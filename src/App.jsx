@@ -394,6 +394,7 @@ function UploadPanel({ onFileChange, dragActive, setDragActive, fileName, error 
 function MultiSelectDropdown({ options, selected, onToggle, onClear }) {
   const [open, setOpen] = useState(false);
   const panelRef = useRef(null);
+  const allSelected = options.length > 0 && selected.length === options.length;
 
   useEffect(() => {
     function handleClick(event) {
@@ -422,6 +423,25 @@ function MultiSelectDropdown({ options, selected, onToggle, onClear }) {
             </button>
           </div>
           <div className="max-h-56 space-y-2 overflow-y-auto pr-1 scrollbar-thin">
+            <label className="flex cursor-pointer items-center gap-3 rounded-xl px-2 py-2 hover:bg-slate-50">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                onChange={(event) => {
+                  if (event.target.checked) {
+                    options.forEach((option) => {
+                      if (!selected.includes(option)) {
+                        onToggle(option);
+                      }
+                    });
+                  } else {
+                    onClear();
+                  }
+                }}
+                className="h-4 w-4 rounded border-slate-300 text-accentBlue focus:ring-accentBlue"
+              />
+              <span className="text-sm font-semibold text-textMain">Select All</span>
+            </label>
             {options.map((option) => (
               <label key={option} className="flex cursor-pointer items-center gap-3 rounded-xl px-2 py-2 hover:bg-slate-50">
                 <input
@@ -669,6 +689,8 @@ export default function App() {
         offerName: row.offerName,
         startDate: row.date,
         endDate: row.date,
+        bankDiscount: 0,
+        pvrDiscount: 0,
       };
 
       if (row.date) {
@@ -679,6 +701,9 @@ export default function App() {
           offerEntry.endDate = row.date;
         }
       }
+
+      offerEntry.bankDiscount += row.bankContribution;
+      offerEntry.pvrDiscount += row.inoxContribution;
 
       bankEntry.offers.set(row.offerName, offerEntry);
       grouped.set(row.bankName, bankEntry);
@@ -848,6 +873,7 @@ export default function App() {
                                     <tr>
                                       <th className="px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">Offer Name</th>
                                       <th className="px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">Date Range</th>
+                                      <th className="px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">Discount Split</th>
                                     </tr>
                                   </thead>
                                   <tbody>
@@ -857,10 +883,15 @@ export default function App() {
                                         <td className="px-4 py-3 font-semibold text-textMain">
                                           {offer.startLabel} to {offer.endLabel}
                                         </td>
+                                        <td className="px-4 py-3 font-semibold text-textMain">
+                                          Bank: {formatCurrency(offer.bankDiscount)}
+                                          <br />
+                                          PVR: {formatCurrency(offer.pvrDiscount)}
+                                        </td>
                                       </tr>
                                     )) : (
                                       <tr>
-                                        <td colSpan="2" className="px-4 py-8 text-center font-semibold text-textMuted">
+                                        <td colSpan="3" className="px-4 py-8 text-center font-semibold text-textMuted">
                                           No offers available for this bank.
                                         </td>
                                       </tr>
