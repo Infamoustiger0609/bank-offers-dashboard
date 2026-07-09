@@ -161,7 +161,7 @@ function formatInteger(value) {
 
 function formatDateLabel(date) {
   if (!date) return "Unknown Date";
-  return new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "short", year: "numeric" }).format(date);
+  return new Intl.DateTimeFormat("en-GB", { month: "short", year: "numeric" }).format(date);
 }
 
 function formatIsoDate(date) {
@@ -515,7 +515,7 @@ function StatCard({ title, value, subtitle, color, icon, delta, extra }) {
         </div>
       </div>
       <p className="mt-3 overflow-hidden text-ellipsis whitespace-nowrap text-[24px] font-bold leading-none text-textMain">{value}</p>
-      <p className="mt-2 text-sm font-medium text-slate-500">{subtitle}</p>
+      {subtitle ? <p className="mt-2 text-sm font-medium text-slate-500">{subtitle}</p> : null}
       {delta ? (
         <p
           className={`mt-2 inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-bold ${
@@ -538,9 +538,7 @@ function StatCard({ title, value, subtitle, color, icon, delta, extra }) {
   );
 }
 
-function UploadPanel({ onFileChange, dragActive, setDragActive, fileName, error }) {
-  const inputRef = useRef(null);
-
+function UploadPanel({ onFileChange, dragActive, setDragActive, fileName, error, onRemoveFile, inputRef }) {
   function handleDrop(event) {
     event.preventDefault();
     setDragActive(false);
@@ -572,7 +570,23 @@ function UploadPanel({ onFileChange, dragActive, setDragActive, fileName, error 
         />
         <p className="font-display text-lg font-bold text-textMain">Upload Excel Performance File</p>
         <p className="mt-2 text-sm text-textMuted">Drag and drop or click to upload `.xlsx`, `.xls`, or `.csv`</p>
-        <p className="mt-3 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">{fileName || "No file selected"}</p>
+        {fileName ? (
+          <div className="mt-3 flex items-center gap-2">
+            <p className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">{fileName}</p>
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onRemoveFile();
+              }}
+              className="rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-bold text-rose-600 hover:bg-rose-100"
+            >
+              ✕ Remove
+            </button>
+          </div>
+        ) : (
+          <p className="mt-3 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">No file selected</p>
+        )}
       </div>
       {error ? <p className="mt-3 text-sm font-semibold text-rose-600">{error}</p> : null}
     </div>
@@ -599,7 +613,13 @@ function MultiSelectDropdown({ options, selected, onToggle, onClear, label }) {
         onClick={() => setOpen((value) => !value)}
         className="flex w-full min-w-[220px] items-center justify-between rounded-2xl border border-borderSoft bg-white px-4 py-3 text-left text-sm font-semibold text-textMain shadow-sm"
       >
-        <span>{selected.length ? `${selected.length} ${label}${selected.length > 1 ? "s" : ""} selected` : `All ${label.charAt(0).toUpperCase()}${label.slice(1)}s`}</span>
+        <span>
+          {selected.length === 0
+            ? `No ${label}s selected`
+            : allSelected
+              ? `All ${label.charAt(0).toUpperCase()}${label.slice(1)}s`
+              : `${selected.length} ${label}${selected.length > 1 ? "s" : ""} selected`}
+        </span>
         <span className="text-textMuted">{open ? "▲" : "▼"}</span>
       </button>
       {open ? (
@@ -648,9 +668,11 @@ function MultiSelectDropdown({ options, selected, onToggle, onClear, label }) {
   );
 }
 
-function DateMultiSelectDropdown({ options, selected, onToggle, onClear }) {
+function DateMultiSelectDropdown({ options, selected, onToggle, onClear, onApplyRange }) {
   const [open, setOpen] = useState(false);
   const panelRef = useRef(null);
+  const [rangeStart, setRangeStart] = useState("");
+  const [rangeEnd, setRangeEnd] = useState("");
   const allSelected = options.length > 0 && selected.length === options.length;
 
   useEffect(() => {
@@ -661,7 +683,12 @@ function DateMultiSelectDropdown({ options, selected, onToggle, onClear }) {
     return () => document.removeEventListener("mousedown", handleClick);
   }, []);
 
-  const summary = selected.length ? `${selected.length} date${selected.length > 1 ? "s" : ""} selected` : "All Dates";
+  const summary =
+    selected.length === 0
+      ? "No dates selected"
+      : allSelected
+        ? "All Dates"
+        : `${selected.length} date${selected.length > 1 ? "s" : ""} selected`;
 
   return (
     <div ref={panelRef} className="relative">
@@ -679,6 +706,27 @@ function DateMultiSelectDropdown({ options, selected, onToggle, onClear }) {
             <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Dates</p>
             <button type="button" onClick={onClear} className="text-xs font-bold text-accentBlue">
               Clear
+            </button>
+          </div>
+          <div className="mb-3 border-b border-borderSoft pb-3">
+            <p className="mb-2 text-xs font-bold uppercase tracking-[0.2em] text-textMuted">Custom Range</p>
+            <div className="flex flex-col gap-2">
+              <div>
+                <label className="mb-1 block text-[10px] font-bold uppercase text-textMuted">From</label>
+                <input type="month" value={rangeStart} onChange={(e) => setRangeStart(e.target.value)} className="w-full rounded-lg border border-borderSoft px-2 py-1.5 text-xs" />
+              </div>
+              <div>
+                <label className="mb-1 block text-[10px] font-bold uppercase text-textMuted">To</label>
+                <input type="month" value={rangeEnd} onChange={(e) => setRangeEnd(e.target.value)} className="w-full rounded-lg border border-borderSoft px-2 py-1.5 text-xs" />
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={!rangeStart || !rangeEnd}
+              onClick={() => onApplyRange(rangeStart, rangeEnd)}
+              className="mt-2 w-full rounded-lg bg-accentBlue py-1.5 text-xs font-bold text-white disabled:opacity-40"
+            >
+              Apply Range
             </button>
           </div>
           <div className="max-h-56 space-y-2 overflow-y-auto pr-1 scrollbar-thin">
@@ -775,7 +823,10 @@ function OfferModal({ offer, onClose }) {
 function BankModal({ bank, offersEntry, discountEntry, onClose }) {
   if (!bank) return null;
 
+  const today = new Date();
   const offers = offersEntry?.offers || [];
+  const activeOffers = offers.filter((offer) => offer.endDate && offer.endDate >= today);
+  const closedOffers = offers.filter((offer) => !offer.endDate || offer.endDate < today);
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/40 px-4 backdrop-blur-sm" onClick={onClose}>
@@ -800,32 +851,28 @@ function BankModal({ bank, offersEntry, discountEntry, onClose }) {
         </div>
         <div className="mt-4 grid gap-4 lg:grid-cols-2">
           <div className="rounded-2xl border border-borderSoft p-4">
-            <p className="text-xs font-bold uppercase tracking-[0.18em] text-textMuted">Offers</p>
-            <div className="mt-3 max-h-64 overflow-y-auto rounded-2xl border border-borderSoft scrollbar-thin">
-              <table className="min-w-full divide-y divide-borderSoft text-sm">
-                <thead className="sticky top-0 bg-slate-50/95 backdrop-blur">
-                  <tr>
-                    <th className="px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">Offer Name</th>
-                    <th className="px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">Date Range</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {offers.length ? offers.map((offer, index) => (
-                    <tr key={offer.offerName} className={index % 2 === 0 ? "bg-white" : "bg-slate-50/60"}>
-                      <td className="px-4 py-3 font-semibold text-textMain">{offer.offerName}</td>
-                      <td className="px-4 py-3 font-semibold text-textMain">
-                        {offer.startLabel} to {offer.endLabel}
-                      </td>
-                    </tr>
-                  )) : (
-                    <tr>
-                      <td colSpan="2" className="px-4 py-8 text-center font-semibold text-textMuted">
-                        No offers available for this bank.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+            <p className="mb-3 text-xs font-bold uppercase tracking-[0.18em] text-textMuted">Offers</p>
+            <div className="max-h-64 overflow-y-auto pr-1 scrollbar-thin">
+              <div className="grid gap-4 lg:grid-cols-2">
+                <div>
+                  <p className="mb-2 text-xs font-bold uppercase tracking-[0.2em] text-emerald-600">Active Offers ({activeOffers.length})</p>
+                  {activeOffers.length ? activeOffers.map((offer) => (
+                    <div key={offer.offerName} className="mb-2 rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2 text-sm">
+                      <p className="font-semibold text-textMain">{offer.offerName}</p>
+                      <p className="text-xs text-textMuted">{offer.startLabel} – {offer.endLabel}</p>
+                    </div>
+                  )) : <p className="text-xs text-textMuted">No active offers</p>}
+                </div>
+                <div>
+                  <p className="mb-2 text-xs font-bold uppercase tracking-[0.2em] text-rose-500">Closed Offers ({closedOffers.length})</p>
+                  {closedOffers.length ? closedOffers.map((offer) => (
+                    <div key={offer.offerName} className="mb-2 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2 text-sm">
+                      <p className="font-semibold text-textMain">{offer.offerName}</p>
+                      <p className="text-xs text-textMuted">{offer.startLabel} – {offer.endLabel}</p>
+                    </div>
+                  )) : <p className="text-xs text-textMuted">No closed offers</p>}
+                </div>
+              </div>
             </div>
           </div>
           <div className="rounded-2xl border border-borderSoft p-4">
@@ -1002,6 +1049,11 @@ export default function App() {
   const [expandedOfferBank, setExpandedOfferBank] = useState(null);
   const [comparisonMode, setComparisonMode] = useState("none");
   const [trendMode, setTrendMode] = useState("monthly");
+  const [bankSortKey, setBankSortKey] = useState(null);
+  const [bankSortDir, setBankSortDir] = useState("desc");
+  const [offerSortKey, setOfferSortKey] = useState(null);
+  const [offerSortDir, setOfferSortDir] = useState("desc");
+  const fileInputRef = useRef(null);
 
   const banks = useMemo(() => [...new Set(rows.map((row) => row.bankName))].sort(), [rows]);
   const offers = useMemo(() => [...new Set(rows.map((row) => row.offerName))].sort(), [rows]);
@@ -1058,6 +1110,18 @@ export default function App() {
     setSelectedChartBanks((current) => current.filter((bank) => banks.includes(bank)));
   }, [banks]);
 
+  useEffect(() => {
+    setDateFilter(dates);
+  }, [dates]);
+
+  useEffect(() => {
+    setBankFilter(banks);
+  }, [banks]);
+
+  useEffect(() => {
+    setOfferFilter(offers);
+  }, [offers]);
+
   function handleFileChange(file) {
     setFileName(file.name);
     setError("");
@@ -1077,9 +1141,6 @@ export default function App() {
         const { parsedRows, missingColumns: missing } = parseWorkbookRows(jsonRows);
         setRows(parsedRows);
         setMissingColumns(missing);
-        setDateFilter([]);
-        setBankFilter([]);
-        setOfferFilter([]);
         setSelectedOffer(null);
       } catch {
         setRows([]);
@@ -1093,12 +1154,35 @@ export default function App() {
     reader.readAsArrayBuffer(file);
   }
 
+  function handleRemoveFile() {
+    setRows([]);
+    setFileName("");
+    setError("");
+    setMissingColumns([]);
+    setDateFilter([]);
+    setBankFilter([]);
+    setOfferFilter([]);
+    setSelectedOffer(null);
+    setSelectedBank(null);
+    setSelectedChartBanks([]);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function applyDateRange(startStr, endStr) {
+    const [startYear, startMonth] = startStr.split("-").map(Number);
+    const [endYear, endMonth] = endStr.split("-").map(Number);
+    const start = new Date(startYear, startMonth - 1, 1);
+    const end = new Date(endYear, endMonth, 0, 23, 59, 59, 999);
+    const matching = [...new Set(rows.filter((row) => row.date && row.date >= start && row.date <= end).map((row) => row.dateLabel))];
+    setDateFilter(matching);
+  }
+
   const filteredRows = useMemo(
     () =>
       rows.filter((row) => {
-        const matchesDate = !dateFilter.length || dateFilter.includes(row.dateLabel);
-        const matchesBank = !bankFilter.length || bankFilter.includes(row.bankName);
-        const matchesOffer = !offerFilter.length || offerFilter.includes(row.offerName);
+        const matchesDate = dateFilter.includes(row.dateLabel);
+        const matchesBank = bankFilter.includes(row.bankName);
+        const matchesOffer = offerFilter.includes(row.offerName);
         return matchesDate && matchesBank && matchesOffer;
       }),
     [rows, dateFilter, bankFilter, offerFilter],
@@ -1107,8 +1191,8 @@ export default function App() {
   const bankOfferFilteredRows = useMemo(
     () =>
       rows.filter((row) => {
-        const matchesBank = !bankFilter.length || bankFilter.includes(row.bankName);
-        const matchesOffer = !offerFilter.length || offerFilter.includes(row.offerName);
+        const matchesBank = bankFilter.includes(row.bankName);
+        const matchesOffer = offerFilter.includes(row.offerName);
         return matchesBank && matchesOffer;
       }),
     [rows, bankFilter, offerFilter],
@@ -1224,6 +1308,18 @@ export default function App() {
 
   const bankRows = useMemo(() => aggregateBanks(filteredRows), [filteredRows]);
   const offerRows = useMemo(() => aggregateOffers(filteredRows), [filteredRows]);
+
+  const sortedBankRows = useMemo(() => {
+    if (!bankSortKey) return bankRows;
+    const sorted = [...bankRows].sort((a, b) => a[bankSortKey] - b[bankSortKey]);
+    return bankSortDir === "desc" ? sorted.reverse() : sorted;
+  }, [bankRows, bankSortKey, bankSortDir]);
+
+  const sortedOfferRows = useMemo(() => {
+    if (!offerSortKey) return offerRows;
+    const sorted = [...offerRows].sort((a, b) => a[offerSortKey] - b[offerSortKey]);
+    return offerSortDir === "desc" ? sorted.reverse() : sorted;
+  }, [offerRows, offerSortKey, offerSortDir]);
   const monthlySeries = useMemo(() => aggregateMonthlySeries(rows, selectedChartBanks), [rows, selectedChartBanks]);
   const seasonalData = useMemo(() => aggregateSeasonalByYear(rows, selectedChartBanks), [rows, selectedChartBanks]);
   const seasonalYears = useMemo(() => Object.keys(seasonalData[0] || {}).filter((key) => key !== "month" && key !== "monthLabel"), [seasonalData]);
@@ -1343,8 +1439,10 @@ export default function App() {
             </div>
             {penetrationData.hasAnyData ? (
               <div className="mt-4 rounded-2xl border border-borderSoft bg-white/70 p-4">
-                <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Bank Offer Penetration</p>
-                <p className="text-xs font-bold uppercase tracking-[0.2em] text-textMuted">{activeDateRangeLabel}</p>
+                <div className="flex items-start justify-between gap-3">
+                  <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Bank Offer Penetration</p>
+                  <p className="text-xs font-extrabold text-textMain">{activeDateRangeLabel}</p>
+                </div>
                 {penetrationData.missingMonths.length ? (
                   <p className="mt-2 text-sm font-semibold text-amber-700">
                     Universal transaction data missing for: {penetrationData.missingMonths.map(formatMonthKeyLabel).join(", ")}
@@ -1377,7 +1475,15 @@ export default function App() {
             ) : null}
           </div>
           <div className="grid gap-4">
-            <UploadPanel onFileChange={handleFileChange} dragActive={dragActive} setDragActive={setDragActive} fileName={fileName} error={error} />
+            <UploadPanel
+              onFileChange={handleFileChange}
+              dragActive={dragActive}
+              setDragActive={setDragActive}
+              fileName={fileName}
+              error={error}
+              onRemoveFile={handleRemoveFile}
+              inputRef={fileInputRef}
+            />
             <div className="rounded-[2rem] border border-white/60 bg-white/90 p-4 shadow-soft">
               <div className="flex flex-wrap items-end gap-3">
                 <DateMultiSelectDropdown
@@ -1386,7 +1492,11 @@ export default function App() {
                   onToggle={(date) => {
                     setDateFilter((current) => (current.includes(date) ? current.filter((item) => item !== date) : [...current, date]));
                   }}
-                  onClear={() => setDateFilter([])}
+                  onClear={() => {
+                    console.log("[Clear audit] Date filter cleared, new value:", []);
+                    setDateFilter([]);
+                  }}
+                  onApplyRange={applyDateRange}
                 />
                 <MultiSelectDropdown
                   options={banks}
@@ -1394,7 +1504,10 @@ export default function App() {
                   onToggle={(bank) => {
                     setBankFilter((current) => (current.includes(bank) ? current.filter((item) => item !== bank) : [...current, bank]));
                   }}
-                  onClear={() => setBankFilter([])}
+                  onClear={() => {
+                    console.log("[Clear audit] Bank filter cleared, new value:", []);
+                    setBankFilter([]);
+                  }}
                   label="bank"
                 />
                 <MultiSelectDropdown
@@ -1403,13 +1516,42 @@ export default function App() {
                   onToggle={(offer) => {
                     setOfferFilter((current) => (current.includes(offer) ? current.filter((item) => item !== offer) : [...current, offer]));
                   }}
-                  onClear={() => setOfferFilter([])}
+                  onClear={() => {
+                    console.log("[Clear audit] Offer filter cleared, new value:", []);
+                    setOfferFilter([]);
+                  }}
                   label="offer"
                 />
               </div>
             </div>
           </div>
         </header>
+
+        <section className="grid gap-5 lg:grid-cols-[1fr_1fr] items-start">
+          <div className="grid h-[160px] gap-4 md:grid-cols-2">
+            <StatCard title="Total Banks" value={formatInteger(extraKpis.totalBanks)} subtitle="Unique bank partners" color={KPI_COLORS[7]} icon="TB" />
+            <StatCard title="Total Offers" value={formatInteger(extraKpis.totalOffers)} subtitle="Active offers" color={KPI_COLORS[7]} icon="TO" />
+          </div>
+
+          <div className="h-[160px] rounded-[2rem] border border-white/60 bg-white/90 p-5 shadow-soft">
+            <button
+              type="button"
+              onClick={() => setShowOffersByBank(true)}
+              className="flex w-full items-center justify-between gap-3 text-left"
+            >
+              <div>
+                <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Info Section</p>
+                <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Total Offers by Each Bank</h2>
+                <p className="mt-2 text-sm font-semibold text-textMuted">
+                  {formatInteger(totalOfferCountByBank)} total offers across {formatInteger(offersByBank.length)} banks
+                </p>
+              </div>
+              <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-2xl border border-borderSoft bg-slate-50 text-lg font-bold text-textMuted">
+                →
+              </span>
+            </button>
+          </div>
+        </section>
 
         <section className="flex flex-col gap-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1433,7 +1575,6 @@ export default function App() {
             <StatCard
               title="Total Transactions"
               value={formatInCrore(kpis.totalTransactions)}
-              subtitle="Discounted transaction count"
               color={KPI_COLORS[0]}
               icon="TX"
               delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.totalTransactions, comparisonKpis.prior.totalTransactions), label: COMPARISON_LABELS[comparisonMode] } : undefined}
@@ -1441,7 +1582,6 @@ export default function App() {
             <StatCard
               title="Gross Revenue"
               value={formatCompactCurrency(kpis.grossRevenue)}
-              subtitle="Sum of Transaction Total"
               color={KPI_COLORS[0]}
               icon="GR"
               delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.grossRevenue, comparisonKpis.prior.grossRevenue), label: COMPARISON_LABELS[comparisonMode] } : undefined}
@@ -1449,7 +1589,6 @@ export default function App() {
             <StatCard
               title="Net Revenue"
               value={formatCompactCurrency(kpis.netRevenue)}
-              subtitle="Amount paid by customer"
               color={KPI_COLORS[0]}
               icon="NR"
               delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.netRevenue, comparisonKpis.prior.netRevenue), label: COMPARISON_LABELS[comparisonMode] } : undefined}
@@ -1457,7 +1596,6 @@ export default function App() {
             <StatCard
               title="Total Discount Given"
               value={formatCompactCurrency(kpis.totalDiscount)}
-              subtitle="Discount amount spent"
               color={KPI_COLORS[0]}
               icon="DG"
               delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.totalDiscount, comparisonKpis.prior.totalDiscount), label: COMPARISON_LABELS[comparisonMode] } : undefined}
@@ -1473,39 +1611,12 @@ export default function App() {
               }
             />
             <StatCard
-              title="Recovery Rate"
+              title="Total Discount Rate"
               value={`${kpis.recoveryRate.toFixed(1)}%`}
-              subtitle="Net revenue / gross revenue"
               color={KPI_COLORS[0]}
               icon="RR"
               delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.recoveryRate, comparisonKpis.prior.recoveryRate), label: COMPARISON_LABELS[comparisonMode] } : undefined}
             />
-          </div>
-        </section>
-
-        <section className="grid gap-5 lg:grid-cols-[1fr_1fr] items-start">
-          <div className="grid gap-4 md:grid-cols-2">
-            <StatCard title="Total Banks" value={formatInteger(extraKpis.totalBanks)} subtitle="Unique bank partners" color={KPI_COLORS[7]} icon="TB" />
-            <StatCard title="Total Offers" value={formatInteger(extraKpis.totalOffers)} subtitle="Active offers" color={KPI_COLORS[7]} icon="TO" />
-          </div>
-
-          <div className="rounded-[2rem] border border-white/60 bg-white/90 p-5 shadow-soft">
-            <button
-              type="button"
-              onClick={() => setShowOffersByBank(true)}
-              className="flex w-full items-center justify-between gap-3 text-left"
-            >
-              <div>
-                <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Info Section</p>
-                <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Total Offers by Each Bank</h2>
-                <p className="mt-2 text-sm font-semibold text-textMuted">
-                  {formatInteger(totalOfferCountByBank)} total offers across {formatInteger(offersByBank.length)} banks
-                </p>
-              </div>
-              <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-2xl border border-borderSoft bg-slate-50 text-lg font-bold text-textMuted">
-                →
-              </span>
-            </button>
           </div>
         </section>
 
@@ -1514,24 +1625,85 @@ export default function App() {
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Bank Scorecard</p>
-                <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Revenue by bank</h2>
+                <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Bank Performance Overview</h2>
               </div>
-              <p className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-600">{formatInteger(bankRows.length)} banks</p>
+              <div className="flex items-center gap-3">
+                {bankSortKey ? (
+                  <button
+                    type="button"
+                    onClick={() => setBankSortKey(null)}
+                    className="text-xs font-bold text-accentBlue hover:underline"
+                  >
+                    Reset to default order
+                  </button>
+                ) : null}
+                <p className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-600">{formatInteger(bankRows.length)} banks</p>
+              </div>
             </div>
             <div className="mt-4 h-[512px] overflow-hidden rounded-3xl border border-borderSoft">
               <div className="h-full overflow-y-scroll overflow-x-auto scrollbar-thin">
                 <table className="min-w-full table-fixed divide-y divide-borderSoft text-sm">
                   <thead className="sticky top-0 bg-slate-50/95 backdrop-blur">
                     <tr>
-                      <th className="w-[18%] px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">Bank</th>
-                      <th className="w-[14%] px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">Total Txns</th>
-                      <th className="w-[20%] px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">Total Revenue</th>
-                      <th className="w-[16%] px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">Total Discount</th>
+                      <th className="w-[18%] px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">
+                        Bank
+                        <span className="mt-0.5 block text-[10px] font-semibold normal-case tracking-normal text-textMuted/70">
+                          ({bankRows.length} banks)
+                        </span>
+                      </th>
+                      <th
+                        className="w-[14%] cursor-pointer select-none px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted hover:text-textMain"
+                        onClick={() => {
+                          const key = "totalTransactions";
+                          if (bankSortKey === key) setBankSortDir((dir) => (dir === "desc" ? "asc" : "desc"));
+                          else {
+                            setBankSortKey(key);
+                            setBankSortDir("desc");
+                          }
+                        }}
+                      >
+                        Total Txns {bankSortKey === "totalTransactions" ? (bankSortDir === "desc" ? "▼" : "▲") : ""}
+                        <span className="mt-0.5 block text-[10px] font-semibold normal-case tracking-normal text-textMuted/70">
+                          ({formatInCrore(kpis.totalTransactions)})
+                        </span>
+                      </th>
+                      <th
+                        className="w-[20%] cursor-pointer select-none px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted hover:text-textMain"
+                        onClick={() => {
+                          const key = "totalRevenue";
+                          if (bankSortKey === key) setBankSortDir((dir) => (dir === "desc" ? "asc" : "desc"));
+                          else {
+                            setBankSortKey(key);
+                            setBankSortDir("desc");
+                          }
+                        }}
+                      >
+                        Total Revenue {bankSortKey === "totalRevenue" ? (bankSortDir === "desc" ? "▼" : "▲") : ""}
+                        <span className="mt-0.5 block text-[10px] font-semibold normal-case tracking-normal text-textMuted/70">
+                          ({formatInCrore(kpis.grossRevenue)})
+                        </span>
+                      </th>
+                      <th
+                        className="w-[16%] cursor-pointer select-none px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted hover:text-textMain"
+                        onClick={() => {
+                          const key = "discountCost";
+                          if (bankSortKey === key) setBankSortDir((dir) => (dir === "desc" ? "asc" : "desc"));
+                          else {
+                            setBankSortKey(key);
+                            setBankSortDir("desc");
+                          }
+                        }}
+                      >
+                        Total Discount {bankSortKey === "discountCost" ? (bankSortDir === "desc" ? "▼" : "▲") : ""}
+                        <span className="mt-0.5 block text-[10px] font-semibold normal-case tracking-normal text-textMuted/70">
+                          ({formatInCrore(kpis.totalDiscount)})
+                        </span>
+                      </th>
                       <th className="w-[32%] px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">Discount Split (Bank / PVR)</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {bankRows.length ? bankRows.map((bank, index) => {
+                    {sortedBankRows.length ? sortedBankRows.map((bank, index) => {
                       const split = discountByBankName.get(bank.bankName);
                       return (
                         <tr key={bank.bankName} className={`${index % 2 === 0 ? "bg-white" : "bg-slate-50/60"} cursor-pointer transition hover:bg-blue-50/70`} onClick={() => toggleSelectedBank(bank.bankName)}>
@@ -1542,13 +1714,23 @@ export default function App() {
                               ({kpis.totalTransactions ? ((bank.totalTransactions / kpis.totalTransactions) * 100).toFixed(1) : "0.0"}%)
                             </span>
                           </td>
-                          <td className="px-4 py-3 font-semibold text-textMain">{formatInLakh(bank.totalRevenue)}</td>
-                          <td className="px-4 py-3 font-semibold text-textMain">{formatInLakh(bank.discountCost)}</td>
+                          <td className="px-4 py-3 font-semibold text-textMain">
+                            <span className="whitespace-nowrap">{formatInCrore(bank.totalRevenue)}</span>
+                            <span className="mt-0.5 block text-xs font-bold text-textMuted">
+                              ({kpis.grossRevenue ? ((bank.totalRevenue / kpis.grossRevenue) * 100).toFixed(1) : "0.0"}%)
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 font-semibold text-textMain">
+                            <span className="whitespace-nowrap">{formatInCrore(bank.discountCost)}</span>
+                            <span className="mt-0.5 block text-xs font-bold text-textMuted">
+                              ({kpis.totalDiscount ? ((bank.discountCost / kpis.totalDiscount) * 100).toFixed(1) : "0.0"}%)
+                            </span>
+                          </td>
                           <td className="px-4 py-3 text-xs font-semibold text-textMain">
                             {split ? (
                               <div className="flex flex-col gap-0.5">
-                                <span className="text-accentBlue">Bank: {formatInLakh(split.bankDiscount)} ({split.bankPercent.toFixed(0)}%)</span>
-                                <span className="text-accentGreen">PVR: {formatInLakh(split.pvrDiscount)} ({split.pvrPercent.toFixed(0)}%)</span>
+                                <span className="text-accentBlue">Bank: {formatInCrore(split.bankDiscount)} ({split.bankPercent.toFixed(0)}%)</span>
+                                <span className="text-accentGreen">PVR: {formatInCrore(split.pvrDiscount)} ({split.pvrPercent.toFixed(0)}%)</span>
                               </div>
                             ) : "—"}
                           </td>
@@ -1610,7 +1792,10 @@ export default function App() {
           <div className="rounded-[2rem] border border-white/60 bg-white/90 p-5 shadow-soft">
             <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Channel Mix</p>
             <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Revenue by Channel</h2>
-            <div className="mt-4 h-[340px] overflow-hidden rounded-3xl bg-appBg p-3">
+            <div className="relative mt-4 h-[340px] overflow-hidden rounded-3xl bg-appBg p-3">
+              <span className="absolute right-3 top-3 z-10 rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-textMuted">
+                Total: {formatInCrore(channelData.reduce((sum, c) => sum + c.value, 0))}
+              </span>
               {channelData.length ? (
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
@@ -1675,28 +1860,102 @@ export default function App() {
               <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Offer Directory</p>
               <h2 className="mt-1 font-display text-2xl font-bold text-textMain">All offers grouped by bank</h2>
             </div>
+            {offerSortKey ? (
+              <button
+                type="button"
+                onClick={() => setOfferSortKey(null)}
+                className="text-xs font-bold text-accentBlue hover:underline"
+              >
+                Reset to default order
+              </button>
+            ) : null}
           </div>
           <div className="mt-4 overflow-hidden rounded-3xl border border-borderSoft">
             <div className="h-[320px] overflow-y-scroll scrollbar-thin">
               <table className="min-w-full divide-y divide-borderSoft text-sm">
                 <thead className="sticky top-0 bg-slate-50/95 backdrop-blur">
                   <tr>
-                    <th className="px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">Bank</th>
-                    <th className="px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">Offer Name</th>
-                    <th className="px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">Transactions</th>
-                    <th className="px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">Revenue</th>
-                    <th className="px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">Discount</th>
+                    <th className="px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">
+                      Bank
+                      <span className="mt-0.5 block text-[10px] font-semibold normal-case tracking-normal text-textMuted/70">
+                        ({banks.length} banks)
+                      </span>
+                    </th>
+                    <th className="px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">
+                      Offer Name
+                      <span className="mt-0.5 block text-[10px] font-semibold normal-case tracking-normal text-textMuted/70">
+                        ({offerRows.length} offers)
+                      </span>
+                    </th>
+                    <th
+                      className="cursor-pointer select-none px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted hover:text-textMain"
+                      onClick={() => {
+                        const key = "transactions";
+                        if (offerSortKey === key) setOfferSortDir((dir) => (dir === "desc" ? "asc" : "desc"));
+                        else {
+                          setOfferSortKey(key);
+                          setOfferSortDir("desc");
+                        }
+                      }}
+                    >
+                      Transactions {offerSortKey === "transactions" ? (offerSortDir === "desc" ? "▼" : "▲") : ""}
+                      <span className="mt-0.5 block text-[10px] font-semibold normal-case tracking-normal text-textMuted/70">
+                        ({formatInCrore(kpis.totalTransactions)})
+                      </span>
+                    </th>
+                    <th
+                      className="cursor-pointer select-none px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted hover:text-textMain"
+                      onClick={() => {
+                        const key = "revenue";
+                        if (offerSortKey === key) setOfferSortDir((dir) => (dir === "desc" ? "asc" : "desc"));
+                        else {
+                          setOfferSortKey(key);
+                          setOfferSortDir("desc");
+                        }
+                      }}
+                    >
+                      Revenue {offerSortKey === "revenue" ? (offerSortDir === "desc" ? "▼" : "▲") : ""}
+                      <span className="mt-0.5 block text-[10px] font-semibold normal-case tracking-normal text-textMuted/70">
+                        ({formatInCrore(kpis.grossRevenue)})
+                      </span>
+                    </th>
+                    <th
+                      className="cursor-pointer select-none px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted hover:text-textMain"
+                      onClick={() => {
+                        const key = "discount";
+                        if (offerSortKey === key) setOfferSortDir((dir) => (dir === "desc" ? "asc" : "desc"));
+                        else {
+                          setOfferSortKey(key);
+                          setOfferSortDir("desc");
+                        }
+                      }}
+                    >
+                      Discount {offerSortKey === "discount" ? (offerSortDir === "desc" ? "▼" : "▲") : ""}
+                      <span className="mt-0.5 block text-[10px] font-semibold normal-case tracking-normal text-textMuted/70">
+                        ({formatInCrore(kpis.totalDiscount)})
+                      </span>
+                    </th>
                     <th className="px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">Discount %</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {offerRows.length ? offerRows.map((offer, index) => (
+                  {sortedOfferRows.length ? sortedOfferRows.map((offer, index) => (
                     <tr key={`${offer.offerName}-${offer.bankName}`} className={`${index % 2 === 0 ? "bg-white" : "bg-slate-50/60"} cursor-pointer transition hover:bg-blue-50/70`} onClick={() => setSelectedOffer(offer)}>
                       <td className="px-4 py-3 font-semibold text-textMain">{offer.bankName}</td>
                       <td className="px-4 py-3 font-bold text-textMain">{offer.offerName}</td>
                       <td className="px-4 py-3 font-semibold text-textMain">{formatInteger(offer.transactions)}</td>
-                      <td className="px-4 py-3 font-semibold text-textMain">{formatCurrency(offer.revenue)}</td>
-                      <td className="px-4 py-3 font-semibold text-textMain">{formatCurrency(offer.discount)}</td>
+                      <td className="px-4 py-3 font-semibold text-textMain">
+                        {formatInCrore(offer.revenue)}
+                        <span className="ml-1 text-xs font-bold text-textMuted">
+                          ({kpis.grossRevenue ? ((offer.revenue / kpis.grossRevenue) * 100).toFixed(2) : "0.00"}%)
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 font-semibold text-textMain">
+                        {formatInCrore(offer.discount)}
+                        <span className="ml-1 text-xs font-bold text-textMuted">
+                          ({kpis.totalDiscount ? ((offer.discount / kpis.totalDiscount) * 100).toFixed(2) : "0.00"}%)
+                        </span>
+                      </td>
                       <td className="px-4 py-3 font-bold text-amber-600">{offer.revenue ? ((offer.discount / offer.revenue) * 100).toFixed(1) : "0.0"}%</td>
                     </tr>
                   )) : (
