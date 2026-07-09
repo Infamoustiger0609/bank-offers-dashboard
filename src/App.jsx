@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
+import pvrInoxLogo from "./Assets/pvr-inox-logo-transparent.png";
 import {
   CartesianGrid,
   Bar,
@@ -1300,6 +1301,7 @@ export default function App() {
       <div className="mx-auto flex h-full max-w-[1800px] flex-col gap-5 overflow-y-auto px-4 py-4 scrollbar-thin sm:px-6 lg:px-8">
         <header className="grid gap-4 lg:grid-cols-[1.4fr_1fr]">
           <div className="rounded-[2rem] border border-white/60 bg-white/80 p-6 shadow-soft backdrop-blur">
+            <img src={pvrInoxLogo} alt="PVR INOX" className="mb-3 h-9 w-auto" />
             <p className="text-xs font-bold uppercase tracking-[0.32em] text-accentBlue">Revenue Intelligence</p>
             <h1 className="mt-3 font-display text-3xl font-bold text-textMain sm:text-4xl">BANK OFFERS PERFORMANCE</h1>
             <p className="mt-3 max-w-2xl text-sm font-medium leading-6 text-textMuted">
