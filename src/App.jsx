@@ -46,6 +46,8 @@ const CHANNEL_COLORS = {
 };
 const CHANNEL_FALLBACK_COLOR = "#94a3b8";
 
+const TICKET_FNB_COLORS = { Tickets: "#2563eb", "F&B": "#f59e0b" };
+
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 const BANK_COLORS = [
@@ -123,21 +125,6 @@ function parseExcelDate(value) {
   return null;
 }
 
-function formatCurrency(value) {
-  return new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "INR",
-    maximumFractionDigits: 0,
-  }).format(value || 0);
-}
-
-function formatCompactCurrency(value) {
-  const amount = Number(value || 0);
-  if (Math.abs(amount) >= 10000000) return `₹${(amount / 10000000).toFixed(1)} Cr`;
-  if (Math.abs(amount) >= 100000) return `₹${(amount / 100000).toFixed(1)} L`;
-  if (Math.abs(amount) >= 1000) return `₹${(amount / 1000).toFixed(1)}K`;
-  return `₹${Math.round(amount)}`;
-}
 
 function formatCompactNumber(value) {
   const amount = Number(value || 0);
@@ -148,11 +135,11 @@ function formatCompactNumber(value) {
 }
 
 function formatInCrore(value) {
-  return `${(Number(value || 0) / 10000000).toFixed(2)} Cr`;
+  return `₹${(Number(value || 0) / 10000000).toFixed(3)} Cr`;
 }
 
-function formatInLakh(value) {
-  return `₹${(Number(value || 0) / 100000).toFixed(2)} L`;
+function formatCountInCrore(value) {
+  return `${(Number(value || 0) / 10000000).toFixed(3)} Cr`;
 }
 
 function formatInteger(value) {
@@ -231,6 +218,12 @@ const TREND_MODES = [
   { key: "yoy", label: "Year on Year" },
 ];
 
+const SEASONAL_METRICS = [
+  { key: "revenue", label: "Revenue", field: "transactionTotal" },
+  { key: "transactions", label: "Transactions", field: "discountedTransactions" },
+  { key: "discount", label: "Discount", field: "discountAmount" },
+];
+
 function monthRange(year, month) {
   return { start: new Date(year, month, 1), end: new Date(year, month + 1, 0, 23, 59, 59, 999) };
 }
@@ -266,6 +259,87 @@ function getComparisonPeriods(mode, latestDataDate) {
 function computeDelta(currentValue, priorValue) {
   if (!priorValue) return null;
   return ((currentValue - priorValue) / priorValue) * 100;
+}
+
+function computeRowTotals(list) {
+  const raw = list.reduce(
+    (acc, row) => {
+      acc.revenue += row.transactionTotal;
+      acc.discount += row.discountAmount;
+      acc.transactions += row.discountedTransactions;
+      return acc;
+    },
+    { revenue: 0, discount: 0, transactions: 0 },
+  );
+  return {
+    revenue: Number(raw.revenue.toFixed(5)),
+    discount: Number(raw.discount.toFixed(5)),
+    transactions: Number(raw.transactions.toFixed(5)),
+  };
+}
+
+function computeDiscountRateNote(currentRate, priorRate) {
+  if (currentRate === null || priorRate === null) return "Not enough data to compare discount rate.";
+  const rateDelta = currentRate - priorRate;
+  if (rateDelta > 2) return "Discount rate rose — growth came with a higher discount cost.";
+  if (rateDelta < -2) return "Discount rate improved alongside the change.";
+  return "Discount rate held steady.";
+}
+
+function computeVolumeValueNote(revenueDeltaPercent, txnDeltaPercent) {
+  if (revenueDeltaPercent === null || txnDeltaPercent === null) return "Not enough data to compare volume and value.";
+  const gap = revenueDeltaPercent - txnDeltaPercent;
+  if (gap > 15) return "Revenue grew faster than transaction count — likely fewer, higher-value transactions.";
+  if (gap < -15) return "Transaction volume grew faster than revenue — lower average value per transaction.";
+  return "Revenue and transaction volume moved together.";
+}
+
+function renderClickableDot(dotProps, dataKey, onClick) {
+  const value = dotProps.payload[dataKey];
+  if (value === undefined || value === null || Number.isNaN(value)) return null;
+  return (
+    <g key={`dot-${dataKey}-${dotProps.index}`} style={{ cursor: "pointer" }} onClick={onClick}>
+      <circle cx={dotProps.cx} cy={dotProps.cy} r={12} fill="transparent" />
+      <circle cx={dotProps.cx} cy={dotProps.cy} r={6} fill={dotProps.stroke} stroke="white" strokeWidth={2} />
+      <circle cx={dotProps.cx} cy={dotProps.cy} r={9} fill="none" stroke={dotProps.stroke} strokeWidth={1} opacity={0.35} />
+    </g>
+  );
+}
+
+function buildAdjacentMonthInsight(bankName, monthKey, allRows) {
+  const bankRows = allRows.filter((row) => row.bankName === bankName && row.monthKey !== "Unknown");
+  const monthKeysWithData = [...new Set(bankRows.map((row) => row.monthKey))].sort((a, b) => {
+    const [am, ay] = a.split("-").map(Number);
+    const [bm, by] = b.split("-").map(Number);
+    return new Date(ay, am - 1, 1) - new Date(by, bm - 1, 1);
+  });
+  const idx = monthKeysWithData.indexOf(monthKey);
+  const priorMonthKey = idx > 0 ? monthKeysWithData[idx - 1] : null;
+
+  const currentTotals = computeRowTotals(bankRows.filter((row) => row.monthKey === monthKey));
+  const currentDiscountRate = currentTotals.revenue ? (currentTotals.discount / currentTotals.revenue) * 100 : null;
+
+  if (!priorMonthKey) {
+    return { hasPrior: false, currentTotals, currentDiscountRate };
+  }
+
+  const priorTotals = computeRowTotals(bankRows.filter((row) => row.monthKey === priorMonthKey));
+  const priorDiscountRate = priorTotals.revenue ? (priorTotals.discount / priorTotals.revenue) * 100 : null;
+  const totalDeltaPercent = priorTotals.revenue ? ((currentTotals.revenue - priorTotals.revenue) / priorTotals.revenue) * 100 : null;
+  const txnDeltaPercent = priorTotals.transactions ? ((currentTotals.transactions - priorTotals.transactions) / priorTotals.transactions) * 100 : null;
+
+  return {
+    hasPrior: true,
+    priorMonthKey,
+    currentTotals,
+    priorTotals,
+    currentDiscountRate,
+    priorDiscountRate,
+    totalDeltaPercent,
+    txnDeltaPercent,
+    discountRateNote: computeDiscountRateNote(currentDiscountRate, priorDiscountRate),
+    volumeValueNote: computeVolumeValueNote(totalDeltaPercent, txnDeltaPercent),
+  };
 }
 
 function inferOfferType(offerName) {
@@ -473,7 +547,8 @@ function aggregateMonthlySeries(rows, selectedBanks) {
   });
 }
 
-function aggregateSeasonalByYear(rows, selectedBanks) {
+function aggregateSeasonalByYear(rows, selectedBanks, metric = "revenue") {
+  const field = SEASONAL_METRICS.find((entry) => entry.key === metric)?.field || "transactionTotal";
   const seasonMap = new Map();
   rows.forEach((row) => {
     if (!selectedBanks.includes(row.bankName)) return;
@@ -481,7 +556,7 @@ function aggregateSeasonalByYear(rows, selectedBanks) {
     const [month, year] = row.monthKey.split("-").map(Number);
     if (!seasonMap.has(month)) seasonMap.set(month, { month, monthLabel: MONTH_NAMES[month - 1] });
     const current = seasonMap.get(month);
-    current[year] = (current[year] || 0) + row.transactionTotal;
+    current[year] = (current[year] || 0) + row[field];
   });
   return [...seasonMap.values()].sort((a, b) => a.month - b.month);
 }
@@ -504,18 +579,18 @@ function safeRatio(numerator, denominator) {
 
 function StatCard({ title, value, subtitle, color, icon, delta, extra }) {
   return (
-    <div className={`min-w-0 rounded-3xl border p-5 shadow-soft ${color.accent}`}>
+    <div className={`min-w-0 rounded-3xl border p-3 shadow-soft ${color.accent}`}>
       <div className="flex items-start justify-between gap-3">
         <p className="min-w-0 flex-1 text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">{title}</p>
         <div
-          className={`flex h-10 min-w-[50px] flex-shrink-0 items-center justify-center rounded-2xl px-3 ${color.dot} text-[14px] font-semibold text-white`}
+          className={`flex h-8 min-w-[50px] flex-shrink-0 items-center justify-center rounded-2xl px-3 ${color.dot} text-[14px] font-semibold text-white`}
           style={{ whiteSpace: "nowrap" }}
         >
           {icon}
         </div>
       </div>
-      <p className="mt-3 overflow-hidden text-ellipsis whitespace-nowrap text-[24px] font-bold leading-none text-textMain">{value}</p>
-      {subtitle ? <p className="mt-2 text-sm font-medium text-slate-500">{subtitle}</p> : null}
+      <p className="mt-1.5 overflow-hidden text-ellipsis whitespace-nowrap text-[18px] font-bold leading-none text-textMain">{value}</p>
+      {subtitle ? <p className="mt-1 text-sm font-medium text-slate-500">{subtitle}</p> : null}
       {delta ? (
         <p
           className={`mt-2 inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-bold ${
@@ -547,9 +622,9 @@ function UploadPanel({ onFileChange, dragActive, setDragActive, fileName, error,
   }
 
   return (
-    <div className="rounded-3xl border border-dashed border-borderSoft bg-white/90 p-4 shadow-soft">
+    <div className="flex h-[90px] flex-col justify-center rounded-2xl border border-white/60 bg-white/90 p-3 shadow-soft">
       <div
-        className={`flex cursor-pointer flex-col items-center justify-center rounded-3xl border-2 border-dashed px-6 py-6 text-center transition ${dragActive ? "border-accentBlue bg-blue-50" : "border-slate-200 bg-slate-50/70 hover:border-accentGreen hover:bg-emerald-50"}`}
+        className={`flex cursor-pointer items-center justify-between gap-2 rounded-xl border border-dashed px-2.5 py-1.5 text-left transition ${dragActive ? "border-accentBlue bg-blue-50" : "border-slate-200 bg-slate-50/70 hover:border-accentGreen hover:bg-emerald-50"}`}
         onClick={() => inputRef.current?.click()}
         onDragOver={(event) => {
           event.preventDefault();
@@ -568,27 +643,24 @@ function UploadPanel({ onFileChange, dragActive, setDragActive, fileName, error,
             if (file) onFileChange(file);
           }}
         />
-        <p className="font-display text-lg font-bold text-textMain">Upload Excel Performance File</p>
-        <p className="mt-2 text-sm text-textMuted">Drag and drop or click to upload `.xlsx`, `.xls`, or `.csv`</p>
+        <div className="min-w-0">
+          <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-textMuted">Upload File</p>
+          <p className="truncate text-xs font-semibold text-textMain">{fileName || "Drag/drop or click to upload"}</p>
+        </div>
         {fileName ? (
-          <div className="mt-3 flex items-center gap-2">
-            <p className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">{fileName}</p>
-            <button
-              type="button"
-              onClick={(event) => {
-                event.stopPropagation();
-                onRemoveFile();
-              }}
-              className="rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-bold text-rose-600 hover:bg-rose-100"
-            >
-              ✕ Remove
-            </button>
-          </div>
-        ) : (
-          <p className="mt-3 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">No file selected</p>
-        )}
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onRemoveFile();
+            }}
+            className="flex-shrink-0 rounded-full border border-rose-200 bg-rose-50 px-2 py-1 text-[10px] font-bold text-rose-600 hover:bg-rose-100"
+          >
+            ✕ Remove
+          </button>
+        ) : null}
       </div>
-      {error ? <p className="mt-3 text-sm font-semibold text-rose-600">{error}</p> : null}
+      {error ? <p className="mt-1 truncate text-[10px] font-semibold text-rose-600">{error}</p> : null}
     </div>
   );
 }
@@ -623,7 +695,7 @@ function MultiSelectDropdown({ options, selected, onToggle, onClear, label }) {
         <span className="text-textMuted">{open ? "▲" : "▼"}</span>
       </button>
       {open ? (
-        <div className="absolute right-0 z-20 mt-2 w-full rounded-2xl border border-borderSoft bg-white p-3 shadow-soft">
+        <div className="absolute right-0 z-[60] mt-2 w-full rounded-2xl border border-borderSoft bg-white p-3 shadow-soft">
           <div className="mb-2 flex items-center justify-between">
             <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">{label}s</p>
             <button type="button" onClick={onClear} className="text-xs font-bold text-accentBlue">
@@ -701,7 +773,7 @@ function DateMultiSelectDropdown({ options, selected, onToggle, onClear, onApply
         <span className="text-textMuted">{open ? "▲" : "▼"}</span>
       </button>
       {open ? (
-        <div className="absolute left-0 z-20 mt-2 w-full rounded-2xl border border-borderSoft bg-white p-3 shadow-soft">
+        <div className="absolute left-0 z-[60] mt-2 w-full rounded-2xl border border-borderSoft bg-white p-3 shadow-soft">
           <div className="mb-2 flex items-center justify-between">
             <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Dates</p>
             <button type="button" onClick={onClear} className="text-xs font-bold text-accentBlue">
@@ -787,28 +859,28 @@ function OfferModal({ offer, onClose }) {
           </button>
         </div>
         <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <MetricBlock title="Revenue" value={formatCurrency(offer.revenue)} />
-          <MetricBlock title="Net Revenue" value={formatCurrency(offer.netRevenue)} />
-          <MetricBlock title="Discount" value={formatCurrency(offer.discount)} />
-          <MetricBlock title="Transactions" value={formatInteger(offer.transactions)} />
-          <MetricBlock title="Free Tickets" value={formatInteger(offer.freeTickets)} />
+          <MetricBlock title="Revenue" value={formatInCrore(offer.revenue)} />
+          <MetricBlock title="Net Revenue" value={formatInCrore(offer.netRevenue)} />
+          <MetricBlock title="Discount" value={formatInCrore(offer.discount)} />
+          <MetricBlock title="Transactions" value={formatCountInCrore(offer.transactions)} />
+          <MetricBlock title="Free Tickets" value={formatCountInCrore(offer.freeTickets)} />
         </div>
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
           <div className="rounded-2xl border border-borderSoft p-4">
             <p className="text-xs font-bold uppercase tracking-[0.18em] text-textMuted">Ticket & F&B</p>
-            <p className="mt-3 text-sm font-semibold text-textMain">Ticket Revenue: {formatCurrency(offer.ticketRevenue)}</p>
-            <p className="mt-2 text-sm font-semibold text-textMain">F&B Revenue: {formatCurrency(offer.fnbRevenue)}</p>
-            <p className="mt-2 text-sm font-semibold text-textMain">Total Tickets: {formatInteger(offer.totalTickets)}</p>
+            <p className="mt-3 text-sm font-semibold text-textMain">Ticket Revenue: {formatInCrore(offer.ticketRevenue)}</p>
+            <p className="mt-2 text-sm font-semibold text-textMain">F&B Revenue: {formatInCrore(offer.fnbRevenue)}</p>
+            <p className="mt-2 text-sm font-semibold text-textMain">Total Tickets: {formatCountInCrore(offer.totalTickets)}</p>
           </div>
           <div className="rounded-2xl border border-borderSoft p-4">
             <p className="text-xs font-bold uppercase tracking-[0.18em] text-textMuted">Contribution Split</p>
             <p className="mt-3 text-sm font-semibold text-textMain">
-              Bank: {formatCurrency(offer.bankContribution)} ({offer.discount ? ((offer.bankContribution / offer.discount) * 100).toFixed(0) : 0}%)
+              Bank: {formatInCrore(offer.bankContribution)} ({offer.discount ? ((offer.bankContribution / offer.discount) * 100).toFixed(0) : 0}%)
             </p>
             <p className="mt-2 text-sm font-semibold text-textMain">
-              Inox: {formatCurrency(offer.inoxContribution)} ({offer.discount ? ((offer.inoxContribution / offer.discount) * 100).toFixed(0) : 0}%)
+              Inox: {formatInCrore(offer.inoxContribution)} ({offer.discount ? ((offer.inoxContribution / offer.discount) * 100).toFixed(0) : 0}%)
             </p>
-            <p className="mt-2 text-sm font-semibold text-textMain">Conv. Fees: {formatCurrency(offer.convFees)}</p>
+            <p className="mt-2 text-sm font-semibold text-textMain">Conv. Fees: {formatInCrore(offer.convFees)}</p>
           </div>
         </div>
         <div className="mt-4 rounded-2xl border border-borderSoft p-4">
@@ -845,9 +917,9 @@ function BankModal({ bank, offersEntry, discountEntry, onClose }) {
           </button>
         </div>
         <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <MetricBlock title="Total Revenue" value={formatCurrency(bank.totalRevenue)} />
-          <MetricBlock title="Discount Cost" value={formatCurrency(bank.discountCost)} />
-          <MetricBlock title="Total Transactions" value={formatInteger(bank.totalTransactions)} />
+          <MetricBlock title="Total Revenue" value={formatInCrore(bank.totalRevenue)} />
+          <MetricBlock title="Discount Cost" value={formatInCrore(bank.discountCost)} />
+          <MetricBlock title="Total Transactions" value={formatCountInCrore(bank.totalTransactions)} />
         </div>
         <div className="mt-4 grid gap-4 lg:grid-cols-2">
           <div className="rounded-2xl border border-borderSoft p-4">
@@ -878,12 +950,12 @@ function BankModal({ bank, offersEntry, discountEntry, onClose }) {
           <div className="rounded-2xl border border-borderSoft p-4">
             <p className="text-xs font-bold uppercase tracking-[0.18em] text-textMuted">Discount Split - Bank vs PVR</p>
             <p className="mt-3 text-sm font-semibold text-textMain">
-              Bank: {formatCurrency(discountEntry?.bankDiscount || 0)} ({(discountEntry?.bankPercent || 0).toFixed(0)}%)
+              Bank: {formatInCrore(discountEntry?.bankDiscount || 0)} ({(discountEntry?.bankPercent || 0).toFixed(0)}%)
             </p>
             <p className="mt-2 text-sm font-semibold text-textMain">
-              PVR: {formatCurrency(discountEntry?.pvrDiscount || 0)} ({(discountEntry?.pvrPercent || 0).toFixed(0)}%)
+              PVR: {formatInCrore(discountEntry?.pvrDiscount || 0)} ({(discountEntry?.pvrPercent || 0).toFixed(0)}%)
             </p>
-            <p className="mt-2 text-sm font-semibold text-textMain">Total: {formatCurrency(discountEntry?.totalDiscount || 0)}</p>
+            <p className="mt-2 text-sm font-semibold text-textMain">Total: {formatInCrore(discountEntry?.totalDiscount || 0)}</p>
           </div>
         </div>
       </div>
@@ -952,9 +1024,9 @@ function OffersByBankModal({ offersByBank, totalOfferCountByBank, expandedOfferB
                                     {offer.startLabel} to {offer.endLabel}
                                   </td>
                                   <td className="px-4 py-3 font-semibold text-textMain">
-                                    Bank: {formatCurrency(offer.bankDiscount)}
+                                    Bank: {formatInCrore(offer.bankDiscount)}
                                     <br />
-                                    PVR: {formatCurrency(offer.pvrDiscount)}
+                                    PVR: {formatInCrore(offer.pvrDiscount)}
                                   </td>
                                 </tr>
                               )) : (
@@ -995,16 +1067,16 @@ function DiscountSplitTooltip({ active, payload, label }) {
     >
       <p className="text-sm font-bold text-textMain">{label}</p>
       <p className="mt-1 text-sm font-semibold text-textMain">
-        Bank Contribution: {formatCurrency(data.bankDiscount)} ({data.bankPercent.toFixed(1)}%)
+        Bank Contribution: {formatInCrore(data.bankDiscount)} ({data.bankPercent.toFixed(1)}%)
       </p>
       <p className="mt-1 text-sm font-semibold text-textMain">
-        PVR Contribution: {formatCurrency(data.pvrDiscount)} ({data.pvrPercent.toFixed(1)}%)
+        PVR Contribution: {formatInCrore(data.pvrDiscount)} ({data.pvrPercent.toFixed(1)}%)
       </p>
     </div>
   );
 }
 
-function MonthlyTrendTooltip({ active, payload, label }) {
+function MonthlyTrendTooltip({ active, payload, label, formatValue = formatInCrore }) {
   if (!active || !payload?.length) return null;
 
   return (
@@ -1015,7 +1087,7 @@ function MonthlyTrendTooltip({ active, payload, label }) {
           <p key={entry.dataKey} className="flex items-center gap-2 text-sm font-semibold text-textMain">
             <span className="h-2.5 w-2.5 flex-shrink-0 rounded-full" style={{ backgroundColor: entry.color }} />
             <span className="min-w-0 flex-1 truncate">{entry.name}</span>
-            <span>{formatCurrency(entry.value)}</span>
+            <span>{formatValue(entry.value)}</span>
           </p>
         ))}
       </div>
@@ -1049,6 +1121,10 @@ export default function App() {
   const [expandedOfferBank, setExpandedOfferBank] = useState(null);
   const [comparisonMode, setComparisonMode] = useState("none");
   const [trendMode, setTrendMode] = useState("monthly");
+  const [seasonalMetric, setSeasonalMetric] = useState("revenue");
+  const [selectedSeasonalPoint, setSelectedSeasonalPoint] = useState(null);
+  const [selectedMonthlyPoint, setSelectedMonthlyPoint] = useState(null);
+  const [selectedYearPoint, setSelectedYearPoint] = useState(null);
   const [bankSortKey, setBankSortKey] = useState(null);
   const [bankSortDir, setBankSortDir] = useState("desc");
   const [offerSortKey, setOfferSortKey] = useState(null);
@@ -1109,6 +1185,12 @@ export default function App() {
   useEffect(() => {
     setSelectedChartBanks((current) => current.filter((bank) => banks.includes(bank)));
   }, [banks]);
+
+  useEffect(() => {
+    setSelectedSeasonalPoint(null);
+    setSelectedMonthlyPoint(null);
+    setSelectedYearPoint(null);
+  }, [seasonalMetric, trendMode, selectedChartBanks]);
 
   useEffect(() => {
     setDateFilter(dates);
@@ -1321,8 +1403,16 @@ export default function App() {
     return offerSortDir === "desc" ? sorted.reverse() : sorted;
   }, [offerRows, offerSortKey, offerSortDir]);
   const monthlySeries = useMemo(() => aggregateMonthlySeries(rows, selectedChartBanks), [rows, selectedChartBanks]);
-  const seasonalData = useMemo(() => aggregateSeasonalByYear(rows, selectedChartBanks), [rows, selectedChartBanks]);
-  const seasonalYears = useMemo(() => Object.keys(seasonalData[0] || {}).filter((key) => key !== "month" && key !== "monthLabel"), [seasonalData]);
+  const seasonalData = useMemo(() => aggregateSeasonalByYear(rows, selectedChartBanks, seasonalMetric), [rows, selectedChartBanks, seasonalMetric]);
+  const seasonalYears = useMemo(() => {
+    const years = new Set();
+    seasonalData.forEach((entry) => {
+      Object.keys(entry).forEach((key) => {
+        if (key !== "month" && key !== "monthLabel") years.add(key);
+      });
+    });
+    return [...years].sort();
+  }, [seasonalData]);
   const yearlyData = useMemo(() => aggregateYearlyTotals(rows, selectedChartBanks), [rows, selectedChartBanks]);
   const discountData = useMemo(() => {
     const grouped = new Map();
@@ -1351,6 +1441,11 @@ export default function App() {
   }, [filteredRows]);
   const discountByBankName = useMemo(() => new Map(discountData.map((entry) => [entry.bankName, entry])), [discountData]);
   const channelData = useMemo(() => aggregateChannelRevenue(filteredRows), [filteredRows]);
+  const ticketVsFnbData = useMemo(() => {
+    const ticket = filteredRows.reduce((sum, r) => sum + r.ticketRevenue, 0);
+    const fnb = filteredRows.reduce((sum, r) => sum + r.fnbRevenue, 0);
+    return [{ name: "Tickets", value: ticket }, { name: "F&B", value: fnb }];
+  }, [filteredRows]);
   const overallSplit = useMemo(() => {
     const totalBank = discountData.reduce((sum, d) => sum + d.bankDiscount, 0);
     const totalPvr = discountData.reduce((sum, d) => sum + d.pvrDiscount, 0);
@@ -1367,7 +1462,7 @@ export default function App() {
     const amount = Number(value || 0);
     if (Math.abs(amount) >= 10000000) return `${(amount / 10000000).toFixed(1)} Cr`;
     if (Math.abs(amount) >= 100000) return `${(amount / 100000).toFixed(1)} L`;
-    return formatCurrency(amount);
+    return formatInCrore(amount);
   }
 
   function toggleSelectedBank(bankName) {
@@ -1391,221 +1486,363 @@ export default function App() {
   const selectedBankRow = useMemo(() => bankRows.find((bank) => bank.bankName === selectedBank) || null, [bankRows, selectedBank]);
   const selectedBankOffersEntry = useMemo(() => offersByBank.find((entry) => entry.bankName === selectedBank) || null, [offersByBank, selectedBank]);
   const selectedBankDiscountEntry = useMemo(() => discountData.find((entry) => entry.bankName === selectedBank) || null, [discountData, selectedBank]);
+  const anyModalOpen = Boolean(selectedBank || selectedOffer || showOffersByBank);
+
+  function buildPairInsight(priorYear, currentYear, relevantRowsForYear) {
+    const currentRows = relevantRowsForYear(currentYear);
+    const priorRows = relevantRowsForYear(priorYear);
+
+    const currentTotals = computeRowTotals(currentRows);
+    const priorTotals = computeRowTotals(priorRows);
+
+    const currentTotal = currentTotals.revenue;
+    const priorTotal = priorTotals.revenue;
+    const totalDeltaAbs = currentTotal - priorTotal;
+    const totalDeltaPercent = priorTotal ? (totalDeltaAbs / priorTotal) * 100 : null;
+
+    const txnDeltaPercent = priorTotals.transactions ? ((currentTotals.transactions - priorTotals.transactions) / priorTotals.transactions) * 100 : null;
+
+    const currentDiscountRate = currentTotals.revenue ? (currentTotals.discount / currentTotals.revenue) * 100 : null;
+    const priorDiscountRate = priorTotals.revenue ? (priorTotals.discount / priorTotals.revenue) * 100 : null;
+
+    const discountRateNote = computeDiscountRateNote(currentDiscountRate, priorDiscountRate);
+    const volumeValueNote = computeVolumeValueNote(totalDeltaPercent, txnDeltaPercent);
+
+    const allBanksInPair = new Set([...priorRows.map((r) => r.bankName), ...currentRows.map((r) => r.bankName)]);
+
+    const bankBreakdown = [...allBanksInPair]
+      .map((bankName) => {
+        const priorRevenue = Number(
+          priorRows
+            .filter((r) => r.bankName === bankName)
+            .reduce((sum, r) => sum + r.transactionTotal, 0)
+            .toFixed(5),
+        );
+        const currentRevenue = Number(
+          currentRows
+            .filter((r) => r.bankName === bankName)
+            .reduce((sum, r) => sum + r.transactionTotal, 0)
+            .toFixed(5),
+        );
+        const deltaAbs = currentRevenue - priorRevenue;
+        const contributionPercent = totalDeltaAbs ? (deltaAbs / totalDeltaAbs) * 100 : null;
+        return { bankName, priorRevenue, currentRevenue, deltaAbs, contributionPercent };
+      })
+      .sort((a, b) => Math.abs(b.deltaAbs) - Math.abs(a.deltaAbs));
+
+    const topBank = bankBreakdown.length ? bankBreakdown[0].bankName : null;
+
+    return {
+      currentTotal,
+      priorTotal,
+      totalDeltaPercent,
+      txnDeltaPercent,
+      currentDiscountRate,
+      priorDiscountRate,
+      discountRateNote,
+      volumeValueNote,
+      bankBreakdown,
+      topBank,
+    };
+  }
+
+  const inferencePairs = useMemo(() => {
+    if (!selectedSeasonalPoint) return [];
+    const { month } = selectedSeasonalPoint;
+
+    const relevantRowsForMonth = (year) =>
+      rows.filter(
+        (r) =>
+          r.monthKey !== "Unknown" &&
+          Number(r.monthKey.split("-")[0]) === month &&
+          Number(r.monthKey.split("-")[1]) === year &&
+          (!selectedChartBanks.length || selectedChartBanks.includes(r.bankName)),
+      );
+
+    const yearsWithData = seasonalYears
+      .map(Number)
+      .filter((year) => relevantRowsForMonth(year).length > 0)
+      .sort((a, b) => a - b);
+
+    const pairs = [];
+    for (let i = 1; i < yearsWithData.length; i++) {
+      const priorYear = yearsWithData[i - 1];
+      const currentYear = yearsWithData[i];
+      pairs.push({ priorYear, currentYear, ...buildPairInsight(priorYear, currentYear, relevantRowsForMonth) });
+    }
+    return pairs;
+  }, [selectedSeasonalPoint, seasonalYears, rows, selectedChartBanks]);
+
+  const monthlyInsight = useMemo(() => {
+    if (!selectedMonthlyPoint) return null;
+    return buildAdjacentMonthInsight(selectedMonthlyPoint.bankName, selectedMonthlyPoint.monthKey, rows);
+  }, [selectedMonthlyPoint, rows]);
+
+  const yearInsight = useMemo(() => {
+    if (!selectedYearPoint) return null;
+    const { year } = selectedYearPoint;
+
+    const relevantRowsForYear = (y) =>
+      rows.filter(
+        (r) =>
+          r.monthKey !== "Unknown" &&
+          Number(r.monthKey.split("-")[1]) === y &&
+          (!selectedChartBanks.length || selectedChartBanks.includes(r.bankName)),
+      );
+
+    const candidateYears = [...new Set(rows.filter((r) => r.monthKey !== "Unknown").map((r) => Number(r.monthKey.split("-")[1])))].sort(
+      (a, b) => a - b,
+    );
+    const yearsWithData = candidateYears.filter((y) => relevantRowsForYear(y).length > 0);
+    const idx = yearsWithData.indexOf(year);
+    const priorYear = idx > 0 ? yearsWithData[idx - 1] : null;
+
+    if (!priorYear) {
+      const currentTotals = computeRowTotals(relevantRowsForYear(year));
+      const currentDiscountRate = currentTotals.revenue ? (currentTotals.discount / currentTotals.revenue) * 100 : null;
+      return { year, hasPrior: false, currentTotals, currentDiscountRate };
+    }
+
+    return { year, priorYear, hasPrior: true, ...buildPairInsight(priorYear, year, relevantRowsForYear) };
+  }, [selectedYearPoint, rows, selectedChartBanks]);
+
+  function handleViewDetails() {
+    if (trendMode === "monthly") {
+      if (selectedMonthlyPoint || !monthlySeries.length || !selectedChartBanks.length) return;
+      const latestRow = monthlySeries[monthlySeries.length - 1];
+      const bankName = selectedChartBanks.find((bank) => typeof latestRow[bank] === "number") || selectedChartBanks[0];
+      setSelectedMonthlyPoint({ bankName, monthKey: latestRow.monthKey, monthLabel: formatMonthKeyLabel(latestRow.monthKey) });
+    } else if (trendMode === "mom") {
+      if (selectedSeasonalPoint || !seasonalData.length) return;
+      const latestRow = seasonalData[seasonalData.length - 1];
+      setSelectedSeasonalPoint({ month: latestRow.month, monthLabel: latestRow.monthLabel });
+    } else if (trendMode === "yoy") {
+      if (selectedYearPoint || !yearlyData.length) return;
+      const latestRow = yearlyData[yearlyData.length - 1];
+      setSelectedYearPoint({ year: Number(latestRow.year) });
+    }
+  }
 
   return (
     <div className="h-full overflow-hidden bg-appBg text-textMain">
       <div className="mx-auto flex h-full max-w-[1800px] flex-col gap-5 overflow-y-auto px-4 py-4 scrollbar-thin sm:px-6 lg:px-8">
-        <header className="grid gap-4 lg:grid-cols-[1.4fr_1fr]">
-          <div className="rounded-[2rem] border border-white/60 bg-white/80 p-6 shadow-soft backdrop-blur">
-            <img src={pvrInoxLogo} alt="PVR INOX" className="mb-3 h-9 w-auto" />
-            <p className="text-xs font-bold uppercase tracking-[0.32em] text-accentBlue">Revenue Intelligence</p>
-            <h1 className="mt-3 font-display text-3xl font-bold text-textMain sm:text-4xl">BANK OFFERS PERFORMANCE</h1>
-            <p className="mt-3 max-w-2xl text-sm font-medium leading-6 text-textMuted">
+        {/* Row 1 — Brand + Quick Period + Bank Offer Penetration */}
+        <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-white/60 bg-white/80 px-4 py-2.5 shadow-soft backdrop-blur">
+          <div className="flex items-center gap-3">
+            <img src={pvrInoxLogo} alt="PVR INOX" className="h-7 w-auto" />
+            <h1 className="font-display text-base font-bold text-textMain sm:text-lg">BANK OFFERS PERFORMANCE</h1>
+          </div>
 
-            </p>
-            <div className="mt-4">
-              <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Quick Period</p>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {QUICK_PERIODS.map((preset) => (
-                  <button
-                    key={preset.key}
-                    type="button"
-                    disabled={!latestDataDate}
-                    onClick={() => {
-                      const range = getQuickPeriodRange(preset.key, latestDataDate);
-                      if (range) applyQuickPeriod(range.rangeStart, range.rangeEnd);
-                    }}
-                    className={`rounded-full border px-4 py-2 text-xs font-bold uppercase tracking-wide transition disabled:cursor-not-allowed disabled:opacity-40 ${
-                      activeQuickPeriodKey === preset.key
-                        ? "border-accentBlue bg-accentBlue text-white"
-                        : "border-borderSoft bg-white text-textMuted hover:bg-slate-50"
-                    }`}
-                  >
-                    {preset.label}
-                  </button>
-                ))}
-                <button
-                  type="button"
-                  onClick={() => setDateFilter([])}
-                  className={`rounded-full border px-4 py-2 text-xs font-bold uppercase tracking-wide transition ${
-                    activeQuickPeriodKey === "clear"
-                      ? "border-accentBlue bg-accentBlue text-white"
-                      : "border-borderSoft bg-white text-textMuted hover:bg-slate-50"
-                  }`}
-                >
-                  Clear
-                </button>
-              </div>
-            </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {QUICK_PERIODS.map((preset) => (
+              <button
+                key={preset.key}
+                type="button"
+                disabled={!latestDataDate}
+                onClick={() => {
+                  const range = getQuickPeriodRange(preset.key, latestDataDate);
+                  if (range) applyQuickPeriod(range.rangeStart, range.rangeEnd);
+                }}
+                className={`rounded-full border px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                  activeQuickPeriodKey === preset.key
+                    ? "border-accentBlue bg-accentBlue text-white"
+                    : "border-borderSoft bg-white text-textMuted hover:bg-slate-50"
+                }`}
+              >
+                {preset.label}
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={() => setDateFilter([])}
+              className={`rounded-full border px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide transition ${
+                activeQuickPeriodKey === "clear"
+                  ? "border-accentBlue bg-accentBlue text-white"
+                  : "border-borderSoft bg-white text-textMuted hover:bg-slate-50"
+              }`}
+            >
+              Clear
+            </button>
+          </div>
+
+          <div className="text-right">
             {penetrationData.hasAnyData ? (
-              <div className="mt-4 rounded-2xl border border-borderSoft bg-white/70 p-4">
-                <div className="flex items-start justify-between gap-3">
-                  <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Bank Offer Penetration</p>
-                  <p className="text-xs font-extrabold text-textMain">{activeDateRangeLabel}</p>
-                </div>
+              <>
+                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-textMuted">
+                  Bank Offer Contribution <span className="ml-1 font-extrabold text-textMain">{activeDateRangeLabel}</span>
+                </p>
                 {penetrationData.missingMonths.length ? (
-                  <p className="mt-2 text-sm font-semibold text-amber-700">
-                    Universal transaction data missing for: {penetrationData.missingMonths.map(formatMonthKeyLabel).join(", ")}
-                  </p>
+                  <p className="text-xs font-semibold text-amber-700">Universal data missing for some months</p>
                 ) : penetrationData.percent !== null ? (
                   <>
-                    <p className="mt-2 text-[28px] font-bold leading-none text-textMain">{penetrationData.percent.toFixed(1)}%</p>
-                    <p className="mt-2 text-sm font-medium text-textMuted">
-                      {formatInCrore(kpis.totalTransactions)} partnered / {formatInCrore(penetrationData.universalTotal)} PVR INOX Total Transaction
+                    <p className="text-lg font-extrabold leading-tight text-textMain">{penetrationData.percent.toFixed(1)}%</p>
+                    <p className="text-xs text-textMuted">
+                      {formatCountInCrore(kpis.totalTransactions)} partnered / {formatCountInCrore(penetrationData.universalTotal)} PVR INOX Total Transaction
                     </p>
                   </>
                 ) : (
-                  <p className="mt-2 text-sm font-semibold text-textMuted">No transactions in the selected period.</p>
+                  <p className="text-xs text-textMuted">No transactions in the selected period.</p>
                 )}
-                {universalData.inconsistent.size > 0 ? (
-                  <p className="mt-2 text-xs font-semibold text-rose-600">
-                    Inconsistent universal totals found for: {[...universalData.inconsistent].map(formatMonthKeyLabel).join(", ")}
-                  </p>
-                ) : null}
-              </div>
+              </>
             ) : (
-              <p className="mt-4 text-xs font-medium text-textMuted">
-                Add a "Universal Transactions" column to your file to see penetration %.
-              </p>
+              <p className="text-xs text-textMuted">Add "Universal Transactions" column to see penetration %.</p>
             )}
-            {missingColumns.length ? (
-              <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-700">
-                Missing columns were handled as zero values: {missingColumns.join(", ")}
-              </div>
+          </div>
+        </div>
+
+        {missingColumns.length || universalData.inconsistent.size > 0 ? (
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2 text-xs font-semibold text-amber-700">
+            {missingColumns.length ? <p>Missing columns were handled as zero values: {missingColumns.join(", ")}</p> : null}
+            {universalData.inconsistent.size > 0 ? (
+              <p>Inconsistent universal totals found for: {[...universalData.inconsistent].map(formatMonthKeyLabel).join(", ")}</p>
             ) : null}
           </div>
-          <div className="grid gap-4">
-            <UploadPanel
-              onFileChange={handleFileChange}
-              dragActive={dragActive}
-              setDragActive={setDragActive}
-              fileName={fileName}
-              error={error}
-              onRemoveFile={handleRemoveFile}
-              inputRef={fileInputRef}
+        ) : null}
+
+        {/* Row 2 (was Row 3) — sticky, centered Date/Bank/Offer filter bar */}
+        <div
+          className={
+            anyModalOpen
+              ? "hidden"
+              : "sticky top-0 z-50 -mx-4 flex justify-center border-b border-borderSoft bg-white/95 px-4 py-2 shadow-sm backdrop-blur sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8"
+          }
+        >
+          <div className="flex flex-wrap items-center justify-center gap-3">
+            <DateMultiSelectDropdown
+              options={dates}
+              selected={dateFilter}
+              onToggle={(date) => {
+                setDateFilter((current) => (current.includes(date) ? current.filter((item) => item !== date) : [...current, date]));
+              }}
+              onClear={() => {
+                console.log("[Clear audit] Date filter cleared, new value:", []);
+                setDateFilter([]);
+              }}
+              onApplyRange={applyDateRange}
             />
-            <div className="rounded-[2rem] border border-white/60 bg-white/90 p-4 shadow-soft">
-              <div className="flex flex-wrap items-end gap-3">
-                <DateMultiSelectDropdown
-                  options={dates}
-                  selected={dateFilter}
-                  onToggle={(date) => {
-                    setDateFilter((current) => (current.includes(date) ? current.filter((item) => item !== date) : [...current, date]));
-                  }}
-                  onClear={() => {
-                    console.log("[Clear audit] Date filter cleared, new value:", []);
-                    setDateFilter([]);
-                  }}
-                  onApplyRange={applyDateRange}
-                />
-                <MultiSelectDropdown
-                  options={banks}
-                  selected={bankFilter}
-                  onToggle={(bank) => {
-                    setBankFilter((current) => (current.includes(bank) ? current.filter((item) => item !== bank) : [...current, bank]));
-                  }}
-                  onClear={() => {
-                    console.log("[Clear audit] Bank filter cleared, new value:", []);
-                    setBankFilter([]);
-                  }}
-                  label="bank"
-                />
-                <MultiSelectDropdown
-                  options={offers}
-                  selected={offerFilter}
-                  onToggle={(offer) => {
-                    setOfferFilter((current) => (current.includes(offer) ? current.filter((item) => item !== offer) : [...current, offer]));
-                  }}
-                  onClear={() => {
-                    console.log("[Clear audit] Offer filter cleared, new value:", []);
-                    setOfferFilter([]);
-                  }}
-                  label="offer"
-                />
-              </div>
+            <MultiSelectDropdown
+              options={banks}
+              selected={bankFilter}
+              onToggle={(bank) => {
+                setBankFilter((current) => (current.includes(bank) ? current.filter((item) => item !== bank) : [...current, bank]));
+              }}
+              onClear={() => {
+                console.log("[Clear audit] Bank filter cleared, new value:", []);
+                setBankFilter([]);
+              }}
+              label="bank"
+            />
+            <MultiSelectDropdown
+              options={offers}
+              selected={offerFilter}
+              onToggle={(offer) => {
+                setOfferFilter((current) => (current.includes(offer) ? current.filter((item) => item !== offer) : [...current, offer]));
+              }}
+              onClear={() => {
+                console.log("[Clear audit] Offer filter cleared, new value:", []);
+                setOfferFilter([]);
+              }}
+              label="offer"
+            />
+          </div>
+        </div>
+
+        {/* Row 3 (was Row 2) — Total Banks / Total Offers / Info Section / Upload, 4 equal compact boxes */}
+        <div className="grid grid-cols-4 gap-3">
+          <div className="flex h-[90px] flex-col justify-center rounded-2xl border border-white/60 bg-white/90 p-3 shadow-soft">
+            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500">Total Banks</p>
+            <p className="mt-1 text-2xl font-extrabold text-textMain">{formatInteger(extraKpis.totalBanks)}</p>
+            <p className="text-xs text-textMuted">Unique bank partners</p>
+          </div>
+          <div className="flex h-[90px] flex-col justify-center rounded-2xl border border-white/60 bg-white/90 p-3 shadow-soft">
+            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500">Total Offers</p>
+            <p className="mt-1 text-2xl font-extrabold text-textMain">{formatInteger(extraKpis.totalOffers)}</p>
+            <p className="text-xs text-textMuted">Active offers</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowOffersByBank(true)}
+            className="flex h-[90px] items-center justify-between gap-2 rounded-2xl border border-white/60 bg-white/90 p-3 text-left shadow-soft"
+          >
+            <div className="min-w-0">
+              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-textMuted">Info Section</p>
+              <p className="mt-1 truncate text-sm font-bold text-textMain">Total Offers by Each Bank</p>
+              <p className="text-xs text-textMuted">
+                {formatInteger(totalOfferCountByBank)} offers across {formatInteger(offersByBank.length)} banks
+              </p>
             </div>
-          </div>
-        </header>
+            <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl border border-borderSoft bg-slate-50 text-sm font-bold text-textMuted">
+              →
+            </span>
+          </button>
+          <UploadPanel
+            onFileChange={handleFileChange}
+            dragActive={dragActive}
+            setDragActive={setDragActive}
+            fileName={fileName}
+            error={error}
+            onRemoveFile={handleRemoveFile}
+            inputRef={fileInputRef}
+          />
+        </div>
 
-        <section className="grid gap-5 lg:grid-cols-[1fr_1fr] items-start">
-          <div className="grid h-[160px] gap-4 md:grid-cols-2">
-            <StatCard title="Total Banks" value={formatInteger(extraKpis.totalBanks)} subtitle="Unique bank partners" color={KPI_COLORS[7]} icon="TB" />
-            <StatCard title="Total Offers" value={formatInteger(extraKpis.totalOffers)} subtitle="Active offers" color={KPI_COLORS[7]} icon="TO" />
-          </div>
-
-          <div className="h-[160px] rounded-[2rem] border border-white/60 bg-white/90 p-5 shadow-soft">
-            <button
-              type="button"
-              onClick={() => setShowOffersByBank(true)}
-              className="flex w-full items-center justify-between gap-3 text-left"
-            >
-              <div>
-                <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Info Section</p>
-                <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Total Offers by Each Bank</h2>
-                <p className="mt-2 text-sm font-semibold text-textMuted">
-                  {formatInteger(totalOfferCountByBank)} total offers across {formatInteger(offersByBank.length)} banks
-                </p>
-              </div>
-              <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-2xl border border-borderSoft bg-slate-50 text-lg font-bold text-textMuted">
-                →
-              </span>
-            </button>
-          </div>
-        </section>
-
+        {/* Row 4 — Key Metrics (kept at full size, most generous space) */}
         <section className="flex flex-col gap-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center justify-between gap-3">
             <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Key Metrics</p>
-            <div className="inline-flex rounded-full border border-borderSoft bg-white p-1 shadow-sm">
-              {COMPARISON_MODES.map((mode) => (
-                <button
-                  key={mode.key}
-                  type="button"
-                  onClick={() => setComparisonMode(mode.key)}
-                  className={`rounded-full px-3 py-1.5 text-xs font-bold uppercase tracking-wide transition ${
-                    comparisonMode === mode.key ? "bg-accentBlue text-white" : "text-textMuted hover:bg-slate-50"
-                  }`}
-                >
-                  {mode.label}
-                </button>
-              ))}
+            <div className="flex items-center gap-3">
+              <div className="inline-flex rounded-full border border-borderSoft bg-white p-1 shadow-sm">
+                {COMPARISON_MODES.map((mode) => (
+                  <button
+                    key={mode.key}
+                    type="button"
+                    onClick={() => setComparisonMode(mode.key)}
+                    className={`rounded-full px-3 py-1.5 text-xs font-bold uppercase tracking-wide transition ${
+                      comparisonMode === mode.key ? "bg-accentBlue text-white" : "text-textMuted hover:bg-slate-50"
+                    }`}
+                  >
+                    {mode.label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-textMuted">Current vs previous</p>
             </div>
           </div>
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
             <StatCard
               title="Total Transactions"
-              value={formatInCrore(kpis.totalTransactions)}
+              value={formatCountInCrore(kpis.totalTransactions)}
               color={KPI_COLORS[0]}
               icon="TX"
               delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.totalTransactions, comparisonKpis.prior.totalTransactions), label: COMPARISON_LABELS[comparisonMode] } : undefined}
             />
             <StatCard
               title="Gross Revenue"
-              value={formatCompactCurrency(kpis.grossRevenue)}
+              value={formatInCrore(kpis.grossRevenue)}
               color={KPI_COLORS[0]}
               icon="GR"
               delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.grossRevenue, comparisonKpis.prior.grossRevenue), label: COMPARISON_LABELS[comparisonMode] } : undefined}
             />
             <StatCard
               title="Net Revenue"
-              value={formatCompactCurrency(kpis.netRevenue)}
+              value={formatInCrore(kpis.netRevenue)}
               color={KPI_COLORS[0]}
               icon="NR"
               delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.netRevenue, comparisonKpis.prior.netRevenue), label: COMPARISON_LABELS[comparisonMode] } : undefined}
             />
             <StatCard
               title="Total Discount Given"
-              value={formatCompactCurrency(kpis.totalDiscount)}
+              value={formatInCrore(kpis.totalDiscount)}
               color={KPI_COLORS[0]}
               icon="DG"
               delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.totalDiscount, comparisonKpis.prior.totalDiscount), label: COMPARISON_LABELS[comparisonMode] } : undefined}
               extra={
                 <>
                   <p className="text-xs font-semibold text-slate-500">
-                    Bank: {formatCurrency(overallSplit.totalBank)} ({overallSplit.bankPercent.toFixed(0)}%)
+                    Bank: {formatInCrore(overallSplit.totalBank)} ({overallSplit.bankPercent.toFixed(0)}%)
                   </p>
                   <p className="text-xs font-semibold text-slate-500">
-                    PVR: {formatCurrency(overallSplit.totalPvr)} ({overallSplit.pvrPercent.toFixed(0)}%)
+                    PVR: {formatInCrore(overallSplit.totalPvr)} ({overallSplit.pvrPercent.toFixed(0)}%)
                   </p>
                 </>
               }
@@ -1621,7 +1858,7 @@ export default function App() {
         </section>
 
         <section className="grid gap-5 xl:grid-cols-[1.65fr_1fr]">
-          <div className="flex h-[620px] flex-col overflow-hidden rounded-[2rem] border border-white/60 bg-white/90 p-5 shadow-soft">
+          <div className="flex h-[488px] flex-col overflow-hidden rounded-[2rem] border border-white/60 bg-white/90 p-5 shadow-soft">
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Bank Scorecard</p>
@@ -1640,7 +1877,7 @@ export default function App() {
                 <p className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-600">{formatInteger(bankRows.length)} banks</p>
               </div>
             </div>
-            <div className="mt-4 h-[512px] overflow-hidden rounded-3xl border border-borderSoft">
+            <div className="mt-4 h-[380px] overflow-hidden rounded-3xl border border-borderSoft">
               <div className="h-full overflow-y-scroll overflow-x-auto scrollbar-thin">
                 <table className="min-w-full table-fixed divide-y divide-borderSoft text-sm">
                   <thead className="sticky top-0 bg-slate-50/95 backdrop-blur">
@@ -1664,7 +1901,7 @@ export default function App() {
                       >
                         Total Txns {bankSortKey === "totalTransactions" ? (bankSortDir === "desc" ? "▼" : "▲") : ""}
                         <span className="mt-0.5 block text-[10px] font-semibold normal-case tracking-normal text-textMuted/70">
-                          ({formatInCrore(kpis.totalTransactions)})
+                          ({formatCountInCrore(kpis.totalTransactions)})
                         </span>
                       </th>
                       <th
@@ -1709,7 +1946,7 @@ export default function App() {
                         <tr key={bank.bankName} className={`${index % 2 === 0 ? "bg-white" : "bg-slate-50/60"} cursor-pointer transition hover:bg-blue-50/70`} onClick={() => toggleSelectedBank(bank.bankName)}>
                           <td className="px-4 py-3 font-bold text-textMain">{bank.bankName}</td>
                           <td className="px-4 py-3 font-semibold text-textMain">
-                            {formatInteger(bank.totalTransactions)}
+                            {formatCountInCrore(bank.totalTransactions)}
                             <span className="ml-1 text-xs font-bold text-textMuted">
                               ({kpis.totalTransactions ? ((bank.totalTransactions / kpis.totalTransactions) * 100).toFixed(1) : "0.0"}%)
                             </span>
@@ -1747,48 +1984,37 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex h-[620px] flex-col overflow-hidden rounded-[2rem] border border-white/60 bg-white/90 p-5 shadow-soft">
+          <div className="flex h-[488px] flex-col justify-center overflow-hidden rounded-[2rem] border border-white/60 bg-white/90 p-5 shadow-soft">
             <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Discount Split</p>
-            <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Discount Distribution - Bank vs PVR</h2>
-            <div className="mt-4 h-[512px] overflow-hidden rounded-3xl bg-appBg p-3">
-              {discountData.length ? (
-                <ResponsiveContainer width="100%" height={512}>
-                  <BarChart
-                    data={discountData}
-                    layout="vertical"
-                    margin={{ top: 10, right: 24, left: 0, bottom: 10 }}
-                    barCategoryGap="26%"
-                    barGap={6}
-                  >
-                    <CartesianGrid stroke="#cbd5e1" strokeDasharray="4 4" />
-                    <XAxis type="number" stroke="#718096" tickFormatter={formatCompactCurrency} allowDecimals={false} tickCount={6} />
-                    <YAxis
-                      type="category"
-                      dataKey="bankName"
-                      stroke="#718096"
-                      width={120}
-                      tick={{ fontSize: 11 }}
-                    />
-                    <Tooltip allowEscapeViewBox={{ x: false, y: false }} content={<DiscountSplitTooltip />} />
-                    <Legend wrapperStyle={{ paddingTop: "20px" }} />
-                    <Bar dataKey="bankDiscount" stackId="a" fill="#2563eb" name="Bank Contribution" minPointSize={4} barSize={14}>
-                      <LabelList dataKey="bankPercent" position="inside" formatter={(v) => `${v.toFixed(0)}%`} style={{ fontSize: 10, fill: "#fff", fontWeight: 600 }} />
-                    </Bar>
-                    <Bar dataKey="pvrDiscount" stackId="a" fill="#10b981" name="PVR Contribution" minPointSize={4} barSize={14}>
-                      <LabelList dataKey="pvrPercent" position="inside" formatter={(v) => `${v.toFixed(0)}%`} style={{ fontSize: 10, fill: "#fff", fontWeight: 600 }} />
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
-              ) : (
-                <div className="flex h-full items-center justify-center rounded-3xl border border-dashed border-borderSoft bg-slate-50 text-center text-sm font-semibold text-textMuted">
-                  Upload data to view discount split by bank.
+            <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Overall Bank vs PVR Contribution</h2>
+            <div className="mt-6 flex flex-col gap-6">
+              <div>
+                <div className="flex items-center justify-between text-sm font-bold text-textMain">
+                  <span className="text-accentBlue">Bank: {formatInCrore(overallSplit.totalBank)} ({overallSplit.bankPercent.toFixed(0)}%)</span>
+                  <span className="text-accentGreen">PVR: {formatInCrore(overallSplit.totalPvr)} ({overallSplit.pvrPercent.toFixed(0)}%)</span>
                 </div>
-              )}
+                <div className="mt-3 flex h-8 w-full overflow-hidden rounded-full bg-slate-100">
+                  <div className="h-full bg-accentBlue transition-all" style={{ width: `${overallSplit.bankPercent}%` }} />
+                  <div className="h-full bg-accentGreen transition-all" style={{ width: `${overallSplit.pvrPercent}%` }} />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="rounded-2xl bg-blue-50 p-4">
+                  <p className="text-xs font-bold uppercase tracking-[0.18em] text-accentBlue">Bank Contribution</p>
+                  <p className="mt-2 text-2xl font-bold text-textMain">{formatInCrore(overallSplit.totalBank)}</p>
+                  <p className="mt-1 text-sm font-semibold text-textMuted">{overallSplit.bankPercent.toFixed(1)}% of total discount</p>
+                </div>
+                <div className="rounded-2xl bg-emerald-50 p-4">
+                  <p className="text-xs font-bold uppercase tracking-[0.18em] text-accentGreen">PVR Contribution</p>
+                  <p className="mt-2 text-2xl font-bold text-textMain">{formatInCrore(overallSplit.totalPvr)}</p>
+                  <p className="mt-1 text-sm font-semibold text-textMuted">{overallSplit.pvrPercent.toFixed(1)}% of total discount</p>
+                </div>
+              </div>
             </div>
           </div>
         </section>
 
-        <section className="grid gap-5 xl:grid-cols-[1.65fr_1fr]">
+        <section className="grid gap-5 xl:grid-cols-2">
           <div className="rounded-[2rem] border border-white/60 bg-white/90 p-5 shadow-soft">
             <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Channel Mix</p>
             <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Revenue by Channel</h2>
@@ -1806,13 +2032,13 @@ export default function App() {
                       cx="50%"
                       cy="50%"
                       outerRadius={110}
-                      label={({ name, value, percent }) => `${name}: ${formatCompactCurrency(value)} (${(percent * 100).toFixed(0)}%)`}
+                      label={({ name, value, percent }) => `${name}: ${formatInCrore(value)} (${(percent * 100).toFixed(0)}%)`}
                     >
                       {channelData.map((entry) => (
                         <Cell key={entry.name} fill={CHANNEL_COLORS[entry.name] || CHANNEL_FALLBACK_COLOR} />
                       ))}
                     </Pie>
-                    <Tooltip formatter={(value) => formatCurrency(value)} contentStyle={{ borderRadius: "18px", borderColor: "#e2e8f0" }} />
+                    <Tooltip formatter={(value) => formatInCrore(value)} contentStyle={{ borderRadius: "18px", borderColor: "#e2e8f0" }} />
                     <Legend />
                   </PieChart>
                 </ResponsiveContainer>
@@ -1825,31 +2051,37 @@ export default function App() {
           </div>
 
           <div className="rounded-[2rem] border border-white/60 bg-white/90 p-5 shadow-soft">
-            <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Discount Split</p>
-            <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Overall Bank vs PVR Contribution</h2>
-            <div className="mt-6 flex flex-col gap-6">
-              <div>
-                <div className="flex items-center justify-between text-sm font-bold text-textMain">
-                  <span className="text-accentBlue">Bank: {formatCurrency(overallSplit.totalBank)} ({overallSplit.bankPercent.toFixed(0)}%)</span>
-                  <span className="text-accentGreen">PVR: {formatCurrency(overallSplit.totalPvr)} ({overallSplit.pvrPercent.toFixed(0)}%)</span>
+            <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Revenue Split</p>
+            <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Ticket vs F&B Revenue</h2>
+            <div className="relative mt-4 h-[340px] overflow-hidden rounded-3xl bg-appBg p-3">
+              <span className="absolute right-3 top-3 z-10 rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-textMuted">
+                Total: {formatInCrore(ticketVsFnbData.reduce((sum, c) => sum + c.value, 0))}
+              </span>
+              {filteredRows.length ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={ticketVsFnbData}
+                      dataKey="value"
+                      nameKey="name"
+                      cx="50%"
+                      cy="50%"
+                      outerRadius={110}
+                      label={({ name, value, percent }) => `${name}: ${formatInCrore(value)} (${(percent * 100).toFixed(0)}%)`}
+                    >
+                      {ticketVsFnbData.map((entry) => (
+                        <Cell key={entry.name} fill={TICKET_FNB_COLORS[entry.name]} />
+                      ))}
+                    </Pie>
+                    <Tooltip formatter={(value) => formatInCrore(value)} contentStyle={{ borderRadius: "18px", borderColor: "#e2e8f0" }} />
+                    <Legend />
+                  </PieChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="flex h-full items-center justify-center rounded-3xl border border-dashed border-borderSoft bg-slate-50 text-center text-sm font-semibold text-textMuted">
+                  Upload data to view ticket vs F&B revenue.
                 </div>
-                <div className="mt-3 flex h-8 w-full overflow-hidden rounded-full bg-slate-100">
-                  <div className="h-full bg-accentBlue transition-all" style={{ width: `${overallSplit.bankPercent}%` }} />
-                  <div className="h-full bg-accentGreen transition-all" style={{ width: `${overallSplit.pvrPercent}%` }} />
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="rounded-2xl bg-blue-50 p-4">
-                  <p className="text-xs font-bold uppercase tracking-[0.18em] text-accentBlue">Bank Contribution</p>
-                  <p className="mt-2 text-2xl font-bold text-textMain">{formatCompactCurrency(overallSplit.totalBank)}</p>
-                  <p className="mt-1 text-sm font-semibold text-textMuted">{overallSplit.bankPercent.toFixed(1)}% of total discount</p>
-                </div>
-                <div className="rounded-2xl bg-emerald-50 p-4">
-                  <p className="text-xs font-bold uppercase tracking-[0.18em] text-accentGreen">PVR Contribution</p>
-                  <p className="mt-2 text-2xl font-bold text-textMain">{formatCompactCurrency(overallSplit.totalPvr)}</p>
-                  <p className="mt-1 text-sm font-semibold text-textMuted">{overallSplit.pvrPercent.toFixed(1)}% of total discount</p>
-                </div>
-              </div>
+              )}
             </div>
           </div>
         </section>
@@ -1900,7 +2132,7 @@ export default function App() {
                     >
                       Transactions {offerSortKey === "transactions" ? (offerSortDir === "desc" ? "▼" : "▲") : ""}
                       <span className="mt-0.5 block text-[10px] font-semibold normal-case tracking-normal text-textMuted/70">
-                        ({formatInCrore(kpis.totalTransactions)})
+                        ({formatCountInCrore(kpis.totalTransactions)})
                       </span>
                     </th>
                     <th
@@ -1943,7 +2175,7 @@ export default function App() {
                     <tr key={`${offer.offerName}-${offer.bankName}`} className={`${index % 2 === 0 ? "bg-white" : "bg-slate-50/60"} cursor-pointer transition hover:bg-blue-50/70`} onClick={() => setSelectedOffer(offer)}>
                       <td className="px-4 py-3 font-semibold text-textMain">{offer.bankName}</td>
                       <td className="px-4 py-3 font-bold text-textMain">{offer.offerName}</td>
-                      <td className="px-4 py-3 font-semibold text-textMain">{formatInteger(offer.transactions)}</td>
+                      <td className="px-4 py-3 font-semibold text-textMain">{formatCountInCrore(offer.transactions)}</td>
                       <td className="px-4 py-3 font-semibold text-textMain">
                         {formatInCrore(offer.revenue)}
                         <span className="ml-1 text-xs font-bold text-textMuted">
@@ -1996,6 +2228,29 @@ export default function App() {
                   </button>
                 ))}
               </div>
+              <button
+                type="button"
+                onClick={handleViewDetails}
+                className="rounded-full border border-borderSoft bg-white px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-textMuted transition hover:bg-slate-50"
+              >
+                View Details ▸
+              </button>
+              {trendMode === "mom" ? (
+                <div className="inline-flex rounded-full border border-borderSoft bg-white p-1 shadow-sm">
+                  {SEASONAL_METRICS.map((metric) => (
+                    <button
+                      key={metric.key}
+                      type="button"
+                      onClick={() => setSeasonalMetric(metric.key)}
+                      className={`rounded-full px-3 py-1.5 text-xs font-bold uppercase tracking-wide transition ${
+                        seasonalMetric === metric.key ? "bg-accentBlue text-white" : "text-textMuted hover:bg-slate-50"
+                      }`}
+                    >
+                      {metric.label}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
               <span className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Independent Filter</span>
               <MultiSelectDropdown
                 options={banks}
@@ -2015,11 +2270,28 @@ export default function App() {
                   <LineChart data={monthlySeries} margin={{ top: 10, right: 20, left: 0, bottom: 10 }}>
                     <CartesianGrid stroke="#e2e8f0" strokeDasharray="4 4" />
                     <XAxis dataKey="monthKey" stroke="#718096" />
-                    <YAxis stroke="#718096" tickFormatter={formatCompactCurrency} />
+                    <YAxis stroke="#718096" tickFormatter={formatInCrore} />
                     <Tooltip allowEscapeViewBox={{ x: false, y: true }} content={<MonthlyTrendTooltip />} />
                     <Legend />
                     {selectedChartBanks.map((bank) => (
-                      <Line key={bank} type="monotone" dataKey={bank} stroke={bankColorMap[bank]} strokeWidth={3} dot={{ r: 4 }} activeDot={{ r: 6 }} connectNulls />
+                      <Line
+                        key={bank}
+                        type="monotone"
+                        dataKey={bank}
+                        stroke={bankColorMap[bank]}
+                        strokeWidth={3}
+                        dot={(dotProps) =>
+                          renderClickableDot(dotProps, bank, () =>
+                            setSelectedMonthlyPoint({
+                              bankName: bank,
+                              monthKey: dotProps.payload.monthKey,
+                              monthLabel: formatMonthKeyLabel(dotProps.payload.monthKey),
+                            }),
+                          )
+                        }
+                        activeDot={{ r: 6 }}
+                        connectNulls
+                      />
                     ))}
                   </LineChart>
                 </ResponsiveContainer>
@@ -2031,14 +2303,38 @@ export default function App() {
             ) : trendMode === "mom" ? (
               seasonalData.length && selectedChartBanks.length ? (
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={seasonalData} margin={{ top: 10, right: 20, left: 0, bottom: 10 }}>
+                  <LineChart data={seasonalData} margin={{ top: 10, right: 20, left: 10, bottom: 10 }}>
                     <CartesianGrid stroke="#e2e8f0" strokeDasharray="4 4" />
                     <XAxis dataKey="monthLabel" stroke="#718096" />
-                    <YAxis stroke="#718096" tickFormatter={formatCompactCurrency} />
-                    <Tooltip allowEscapeViewBox={{ x: false, y: true }} content={<MonthlyTrendTooltip />} />
+                    <YAxis
+                      stroke="#718096"
+                      tickFormatter={seasonalMetric === "transactions" ? formatCountInCrore : formatInCrore}
+                      label={{
+                        value: seasonalMetric === "revenue" ? "Revenue (₹ Cr)" : seasonalMetric === "transactions" ? "Transactions" : "Discount (₹ Cr)",
+                        angle: -90,
+                        position: "insideLeft",
+                      }}
+                    />
+                    <Tooltip
+                      allowEscapeViewBox={{ x: false, y: true }}
+                      content={<MonthlyTrendTooltip formatValue={seasonalMetric === "transactions" ? formatCountInCrore : formatInCrore} />}
+                    />
                     <Legend />
                     {seasonalYears.map((year, index) => (
-                      <Line key={year} type="monotone" dataKey={year} stroke={BANK_COLORS[index % BANK_COLORS.length]} strokeWidth={3} dot={{ r: 4 }} activeDot={{ r: 6 }} connectNulls />
+                      <Line
+                        key={year}
+                        type="monotone"
+                        dataKey={year}
+                        stroke={BANK_COLORS[index % BANK_COLORS.length]}
+                        strokeWidth={3}
+                        dot={(dotProps) =>
+                          renderClickableDot(dotProps, year, () =>
+                            setSelectedSeasonalPoint({ month: dotProps.payload.month, monthLabel: dotProps.payload.monthLabel }),
+                          )
+                        }
+                        activeDot={{ r: 6 }}
+                        connectNulls
+                      />
                     ))}
                   </LineChart>
                 </ResponsiveContainer>
@@ -2052,11 +2348,19 @@ export default function App() {
                 <BarChart data={yearlyData} margin={{ top: 24, right: 20, left: 0, bottom: 10 }}>
                   <CartesianGrid stroke="#e2e8f0" strokeDasharray="4 4" />
                   <XAxis dataKey="year" stroke="#718096" />
-                  <YAxis stroke="#718096" tickFormatter={formatCompactCurrency} />
-                  <Tooltip formatter={(value) => formatCurrency(value)} contentStyle={{ borderRadius: "18px", borderColor: "#e2e8f0" }} />
+                  <YAxis stroke="#718096" tickFormatter={formatInCrore} />
+                  <Tooltip formatter={(value) => formatInCrore(value)} contentStyle={{ borderRadius: "18px", borderColor: "#e2e8f0" }} />
                   <Legend />
-                  <Bar dataKey="revenue" name="Revenue" fill="#2563eb" radius={[8, 8, 0, 0]}>
-                    <LabelList dataKey="revenue" position="top" formatter={(value) => formatCompactCurrency(value)} style={{ fontSize: 12, fontWeight: 700, fill: "#1a202c" }} />
+                  <Bar
+                    dataKey="revenue"
+                    name="Revenue"
+                    fill="#2563eb"
+                    radius={[8, 8, 0, 0]}
+                    cursor="pointer"
+                    activeBar={{ fill: "#1d4ed8" }}
+                    onClick={(data) => setSelectedYearPoint({ year: Number(data.year) })}
+                  >
+                    <LabelList dataKey="revenue" position="top" formatter={(value) => formatInCrore(value)} style={{ fontSize: 12, fontWeight: 700, fill: "#1a202c" }} />
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
@@ -2066,6 +2370,211 @@ export default function App() {
               </div>
             )}
           </div>
+          <p className="mt-2 flex items-center gap-1.5 text-xs font-semibold text-textMuted">
+            <span className="inline-block h-2 w-2 rounded-full bg-accentBlue"></span>
+            {trendMode === "monthly"
+              ? "Click any point on the chart, or use View Details, to see what changed since the previous month"
+              : trendMode === "mom"
+                ? "Click any point on the chart, or use View Details, to see what drove that month's change"
+                : "Click any bar on the chart, or use View Details, to see what drove that year's change"}
+          </p>
+          {trendMode === "mom" && selectedSeasonalPoint ? (
+            <div className="mt-4 rounded-2xl border border-borderSoft bg-slate-50 p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <p className="text-sm font-bold text-textMain">{selectedSeasonalPoint.monthLabel}</p>
+                <button type="button" onClick={() => setSelectedSeasonalPoint(null)} className="text-xs font-bold text-textMuted hover:text-textMain">
+                  ✕ Close
+                </button>
+              </div>
+
+              {inferencePairs.length === 0 ? (
+                <p className="text-sm text-textMuted">Not enough historical data for this month to compare.</p>
+              ) : (
+                inferencePairs.map((pair, idx) => (
+                  <div key={`${pair.priorYear}-${pair.currentYear}`} className={idx > 0 ? "mt-4 border-t border-borderSoft pt-4" : ""}>
+                    <p className="mb-2 text-sm font-bold text-textMain">
+                      {pair.priorYear} → {pair.currentYear}
+                    </p>
+                    <p className="mb-1 text-xs text-textMuted">
+                      Shows the size of the year-over-year change, not a reason for it — the data has no field that explains why.
+                    </p>
+                    <p className="mb-3 text-sm text-textMain">
+                      Overall{" "}
+                      {pair.totalDeltaPercent === null
+                        ? "change unavailable"
+                        : `${pair.totalDeltaPercent > 0 ? "up" : "down"} ${Math.abs(pair.totalDeltaPercent).toFixed(1)}%`}{" "}
+                      ({formatInCrore(pair.priorTotal)} → {formatInCrore(pair.currentTotal)})
+                    </p>
+
+                    <p className="mb-2 text-xs font-bold uppercase tracking-[0.15em] text-textMuted">Who drove it</p>
+                    <div className="mb-3 space-y-1.5">
+                      {pair.bankBreakdown.slice(0, 5).map((b) => (
+                        <div key={b.bankName} className="flex items-center justify-between text-sm">
+                          <span className="text-textMain">{b.bankName}</span>
+                          <span className={b.deltaAbs >= 0 ? "font-semibold text-emerald-600" : "font-semibold text-rose-500"}>
+                            {b.deltaAbs >= 0 ? "+" : ""}
+                            {formatInCrore(b.deltaAbs)} ({b.contributionPercent === null ? "—" : `${b.contributionPercent.toFixed(0)}%`} of change)
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="mb-3 grid grid-cols-2 gap-3">
+                      <div className="rounded-xl bg-white p-3">
+                        <p className="text-xs font-bold uppercase tracking-[0.15em] text-textMuted">Discount rate this month</p>
+                        <p className="text-sm text-textMain">
+                          {pair.priorDiscountRate === null ? "—" : `${pair.priorDiscountRate.toFixed(1)}%`} →{" "}
+                          {pair.currentDiscountRate === null ? "—" : `${pair.currentDiscountRate.toFixed(1)}%`}
+                        </p>
+                        <p className="mt-1 text-xs text-textMuted">{pair.discountRateNote}</p>
+                      </div>
+                      <div className="rounded-xl bg-white p-3">
+                        <p className="text-xs font-bold uppercase tracking-[0.15em] text-textMuted">Volume vs value</p>
+                        <p className="text-sm text-textMain">
+                          Txns {pair.txnDeltaPercent === null ? "—" : `${pair.txnDeltaPercent > 0 ? "+" : ""}${pair.txnDeltaPercent.toFixed(1)}%`} · Revenue{" "}
+                          {pair.totalDeltaPercent === null ? "—" : `${pair.totalDeltaPercent > 0 ? "+" : ""}${pair.totalDeltaPercent.toFixed(1)}%`}
+                        </p>
+                        <p className="mt-1 text-xs text-textMuted">{pair.volumeValueNote}</p>
+                      </div>
+                    </div>
+
+                    <p className="text-xs italic text-textMuted">
+                      Worth checking: was there a specific offer or partnership change behind {pair.topBank ? pair.topBank : "this shift"} in{" "}
+                      {selectedSeasonalPoint.monthLabel.split(" ")[0]} {pair.currentYear}?
+                    </p>
+                  </div>
+                ))
+              )}
+            </div>
+          ) : null}
+
+          {trendMode === "monthly" && selectedMonthlyPoint ? (
+            <div className="mt-4 rounded-2xl border border-borderSoft bg-slate-50 p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <p className="text-sm font-bold text-textMain">
+                  {selectedMonthlyPoint.bankName} — {selectedMonthlyPoint.monthLabel}
+                </p>
+                <button type="button" onClick={() => setSelectedMonthlyPoint(null)} className="text-xs font-bold text-textMuted hover:text-textMain">
+                  ✕ Close
+                </button>
+              </div>
+              <p className="mb-3 text-xs text-textMuted">Shows the size of the change, not a reason for it — the data has no field that explains why.</p>
+
+              {monthlyInsight.hasPrior ? (
+                <>
+                  <p className="mb-3 text-sm text-textMain">
+                    Overall{" "}
+                    {monthlyInsight.totalDeltaPercent === null
+                      ? "change unavailable"
+                      : `${monthlyInsight.totalDeltaPercent > 0 ? "up" : "down"} ${Math.abs(monthlyInsight.totalDeltaPercent).toFixed(1)}%`}{" "}
+                    ({formatInCrore(monthlyInsight.priorTotals.revenue)} → {formatInCrore(monthlyInsight.currentTotals.revenue)})
+                  </p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="rounded-xl bg-white p-3">
+                      <p className="text-xs font-bold uppercase tracking-[0.15em] text-textMuted">Discount rate</p>
+                      <p className="text-sm text-textMain">
+                        {monthlyInsight.priorDiscountRate === null ? "—" : `${monthlyInsight.priorDiscountRate.toFixed(1)}%`} →{" "}
+                        {monthlyInsight.currentDiscountRate === null ? "—" : `${monthlyInsight.currentDiscountRate.toFixed(1)}%`}
+                      </p>
+                      <p className="mt-1 text-xs text-textMuted">{monthlyInsight.discountRateNote}</p>
+                    </div>
+                    <div className="rounded-xl bg-white p-3">
+                      <p className="text-xs font-bold uppercase tracking-[0.15em] text-textMuted">Volume vs value</p>
+                      <p className="text-sm text-textMain">
+                        Txns{" "}
+                        {monthlyInsight.txnDeltaPercent === null
+                          ? "—"
+                          : `${monthlyInsight.txnDeltaPercent > 0 ? "+" : ""}${monthlyInsight.txnDeltaPercent.toFixed(1)}%`}{" "}
+                        · Revenue{" "}
+                        {monthlyInsight.totalDeltaPercent === null
+                          ? "—"
+                          : `${monthlyInsight.totalDeltaPercent > 0 ? "+" : ""}${monthlyInsight.totalDeltaPercent.toFixed(1)}%`}
+                      </p>
+                      <p className="mt-1 text-xs text-textMuted">{monthlyInsight.volumeValueNote}</p>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="mb-1 text-xs font-semibold text-amber-700">No prior month to compare — showing this month's figures.</p>
+                  <p className="text-sm text-textMain">
+                    Revenue: {formatInCrore(monthlyInsight.currentTotals.revenue)} · Transactions:{" "}
+                    {formatCountInCrore(monthlyInsight.currentTotals.transactions)} · Discount: {formatInCrore(monthlyInsight.currentTotals.discount)} ·
+                    Discount rate: {monthlyInsight.currentDiscountRate === null ? "—" : `${monthlyInsight.currentDiscountRate.toFixed(1)}%`}
+                  </p>
+                </>
+              )}
+            </div>
+          ) : null}
+
+          {trendMode === "yoy" && selectedYearPoint ? (
+            <div className="mt-4 rounded-2xl border border-borderSoft bg-slate-50 p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <p className="text-sm font-bold text-textMain">{selectedYearPoint.year}</p>
+                <button type="button" onClick={() => setSelectedYearPoint(null)} className="text-xs font-bold text-textMuted hover:text-textMain">
+                  ✕ Close
+                </button>
+              </div>
+              <p className="mb-3 text-xs text-textMuted">Shows the size of the change, not a reason for it — the data has no field that explains why.</p>
+
+              {yearInsight.hasPrior ? (
+                <>
+                  <p className="mb-3 text-sm text-textMain">
+                    Overall{" "}
+                    {yearInsight.totalDeltaPercent === null
+                      ? "change unavailable"
+                      : `${yearInsight.totalDeltaPercent > 0 ? "up" : "down"} ${Math.abs(yearInsight.totalDeltaPercent).toFixed(1)}%`}{" "}
+                    ({formatInCrore(yearInsight.priorTotal)} → {formatInCrore(yearInsight.currentTotal)})
+                  </p>
+
+                  <p className="mb-2 text-xs font-bold uppercase tracking-[0.15em] text-textMuted">Who drove it</p>
+                  <div className="mb-3 space-y-1.5">
+                    {yearInsight.bankBreakdown.slice(0, 5).map((b) => (
+                      <div key={b.bankName} className="flex items-center justify-between text-sm">
+                        <span className="text-textMain">{b.bankName}</span>
+                        <span className={b.deltaAbs >= 0 ? "font-semibold text-emerald-600" : "font-semibold text-rose-500"}>
+                          {b.deltaAbs >= 0 ? "+" : ""}
+                          {formatInCrore(b.deltaAbs)} ({b.contributionPercent === null ? "—" : `${b.contributionPercent.toFixed(0)}%`} of change)
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="rounded-xl bg-white p-3">
+                      <p className="text-xs font-bold uppercase tracking-[0.15em] text-textMuted">Discount rate</p>
+                      <p className="text-sm text-textMain">
+                        {yearInsight.priorDiscountRate === null ? "—" : `${yearInsight.priorDiscountRate.toFixed(1)}%`} →{" "}
+                        {yearInsight.currentDiscountRate === null ? "—" : `${yearInsight.currentDiscountRate.toFixed(1)}%`}
+                      </p>
+                      <p className="mt-1 text-xs text-textMuted">{yearInsight.discountRateNote}</p>
+                    </div>
+                    <div className="rounded-xl bg-white p-3">
+                      <p className="text-xs font-bold uppercase tracking-[0.15em] text-textMuted">Volume vs value</p>
+                      <p className="text-sm text-textMain">
+                        Txns{" "}
+                        {yearInsight.txnDeltaPercent === null ? "—" : `${yearInsight.txnDeltaPercent > 0 ? "+" : ""}${yearInsight.txnDeltaPercent.toFixed(1)}%`}{" "}
+                        · Revenue{" "}
+                        {yearInsight.totalDeltaPercent === null
+                          ? "—"
+                          : `${yearInsight.totalDeltaPercent > 0 ? "+" : ""}${yearInsight.totalDeltaPercent.toFixed(1)}%`}
+                      </p>
+                      <p className="mt-1 text-xs text-textMuted">{yearInsight.volumeValueNote}</p>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="mb-1 text-xs font-semibold text-amber-700">No prior year to compare — showing this year's figures.</p>
+                  <p className="text-sm text-textMain">
+                    Revenue: {formatInCrore(yearInsight.currentTotals.revenue)} · Transactions: {formatCountInCrore(yearInsight.currentTotals.transactions)}{" "}
+                    · Discount: {formatInCrore(yearInsight.currentTotals.discount)} · Discount rate:{" "}
+                    {yearInsight.currentDiscountRate === null ? "—" : `${yearInsight.currentDiscountRate.toFixed(1)}%`}
+                  </p>
+                </>
+              )}
+            </div>
+          ) : null}
         </section>
       </div>
 
