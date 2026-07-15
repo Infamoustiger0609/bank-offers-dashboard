@@ -1411,8 +1411,18 @@ export default function App() {
   const fileInputRef = useRef(null);
   const upiFileInputRef = useRef(null);
 
-  const banks = useMemo(() => [...new Set(rows.map((row) => row.bankName))].sort(), [rows]);
-  const offers = useMemo(() => [...new Set(rows.map((row) => row.offerName))].sort(), [rows]);
+  const categoryScopedRows = useMemo(() => {
+    if (paymentCategoryFilter === "all") return rows;
+    const wantCategory = paymentCategoryFilter === "card" ? "Card" : "UPI";
+    return rows.filter((row) => row.paymentCategory === wantCategory);
+  }, [rows, paymentCategoryFilter]);
+
+  const banks = useMemo(() => [...new Set(categoryScopedRows.map((row) => row.bankName))].sort(), [categoryScopedRows]);
+
+  const offers = useMemo(() => {
+    const bankScopedRows = bankFilter.length ? categoryScopedRows.filter((row) => bankFilter.includes(row.bankName)) : categoryScopedRows;
+    return [...new Set(bankScopedRows.map((row) => canonicalOfferName(row.offerName)))].sort();
+  }, [categoryScopedRows, bankFilter]);
   const dates = useMemo(
     () =>
       [...new Set(rows.map((row) => row.dateLabel))].sort((left, right) => {
@@ -1569,7 +1579,7 @@ export default function App() {
       rows.filter((row) => {
         const matchesDate = dateFilter.includes(row.dateLabel);
         const matchesBank = bankFilter.includes(row.bankName);
-        const matchesOffer = offerFilter.includes(row.offerName);
+        const matchesOffer = offerFilter.includes(canonicalOfferName(row.offerName));
         const matchesPaymentCategory =
           paymentCategoryFilter === "all" || row.paymentCategory === (paymentCategoryFilter === "card" ? "Card" : "UPI");
         return matchesDate && matchesBank && matchesOffer && matchesPaymentCategory;
@@ -1581,7 +1591,7 @@ export default function App() {
     () =>
       rows.filter((row) => {
         const matchesBank = bankFilter.includes(row.bankName);
-        const matchesOffer = offerFilter.includes(row.offerName);
+        const matchesOffer = offerFilter.includes(canonicalOfferName(row.offerName));
         const matchesPaymentCategory =
           paymentCategoryFilter === "all" || row.paymentCategory === (paymentCategoryFilter === "card" ? "Card" : "UPI");
         return matchesBank && matchesOffer && matchesPaymentCategory;
@@ -1792,7 +1802,16 @@ export default function App() {
   const bankRows = useMemo(() => aggregateBanks(filteredRows), [filteredRows]);
   const offerRows = useMemo(() => aggregateOffers(filteredRows), [filteredRows]);
 
-  const globalBankRows = useMemo(() => aggregateBanks(rows), [rows]);
+  const rankScopeRows = useMemo(() => {
+    return rows.filter((row) => {
+      const matchesDate = dateFilter.includes(row.dateLabel);
+      const matchesCategory =
+        paymentCategoryFilter === "all" || row.paymentCategory === (paymentCategoryFilter === "card" ? "Card" : "UPI");
+      return matchesDate && matchesCategory;
+    });
+  }, [rows, dateFilter, paymentCategoryFilter]);
+
+  const globalBankRows = useMemo(() => aggregateBanks(rankScopeRows), [rankScopeRows]);
   const globalBankRankMap = useMemo(() => {
     const sorted = [...globalBankRows].sort((a, b) => b.totalRevenue - a.totalRevenue);
     const map = new Map();
@@ -1811,8 +1830,24 @@ export default function App() {
     const sorted = [...offerRows].sort((a, b) => a[offerSortKey] - b[offerSortKey]);
     return offerSortDir === "desc" ? sorted.reverse() : sorted;
   }, [offerRows, offerSortKey, offerSortDir]);
-  const monthlySeries = useMemo(() => aggregateMonthlySeries(rows, bankFilter), [rows, bankFilter]);
-  const seasonalData = useMemo(() => aggregateSeasonalByYear(rows, bankFilter, seasonalMetric), [rows, bankFilter, seasonalMetric]);
+  const categoryDateOfferScopedRows = useMemo(() => {
+    return rows.filter((row) => {
+      const matchesDate = dateFilter.includes(row.dateLabel);
+      const matchesOffer = offerFilter.includes(canonicalOfferName(row.offerName));
+      const matchesCategory =
+        paymentCategoryFilter === "all" || row.paymentCategory === (paymentCategoryFilter === "card" ? "Card" : "UPI");
+      return matchesDate && matchesOffer && matchesCategory;
+    });
+  }, [rows, dateFilter, offerFilter, paymentCategoryFilter]);
+
+  const monthlySeries = useMemo(
+    () => aggregateMonthlySeries(categoryDateOfferScopedRows, bankFilter),
+    [categoryDateOfferScopedRows, bankFilter],
+  );
+  const seasonalData = useMemo(
+    () => aggregateSeasonalByYear(categoryDateOfferScopedRows, bankFilter, seasonalMetric),
+    [categoryDateOfferScopedRows, bankFilter, seasonalMetric],
+  );
   const seasonalYears = useMemo(() => {
     const years = new Set();
     seasonalData.forEach((entry) => {
@@ -1822,7 +1857,10 @@ export default function App() {
     });
     return [...years].sort();
   }, [seasonalData]);
-  const yearlyData = useMemo(() => aggregateYearlyTotals(rows, bankFilter), [rows, bankFilter]);
+  const yearlyData = useMemo(
+    () => aggregateYearlyTotals(categoryDateOfferScopedRows, bankFilter),
+    [categoryDateOfferScopedRows, bankFilter],
+  );
   const discountData = useMemo(() => {
     const grouped = new Map();
 
@@ -1985,7 +2023,7 @@ export default function App() {
     const { month } = selectedSeasonalPoint;
 
     const relevantRowsForMonth = (year) =>
-      rows.filter(
+      categoryDateOfferScopedRows.filter(
         (r) =>
           r.monthKey !== "Unknown" &&
           Number(r.monthKey.split("-")[0]) === month &&
@@ -2005,17 +2043,17 @@ export default function App() {
       pairs.push({ priorYear, currentYear, ...buildPairInsight(priorYear, currentYear, relevantRowsForMonth, admitsData.map) });
     }
     return pairs;
-  }, [selectedSeasonalPoint, seasonalYears, rows, bankFilter, admitsData]);
+  }, [selectedSeasonalPoint, seasonalYears, categoryDateOfferScopedRows, bankFilter, admitsData]);
 
   const monthlyInsight = useMemo(() => {
     if (!selectedMonthlyPoint) return null;
-    return buildAdjacentMonthInsight(selectedMonthlyPoint.bankName, selectedMonthlyPoint.monthKey, rows, admitsData.map);
-  }, [selectedMonthlyPoint, rows, admitsData]);
+    return buildAdjacentMonthInsight(selectedMonthlyPoint.bankName, selectedMonthlyPoint.monthKey, categoryDateOfferScopedRows, admitsData.map);
+  }, [selectedMonthlyPoint, categoryDateOfferScopedRows, admitsData]);
 
   const monthlyYoY = useMemo(() => {
     if (!selectedMonthlyPoint) return null;
-    return buildBankYearOverYear(selectedMonthlyPoint.bankName, selectedMonthlyPoint.monthKey, rows);
-  }, [selectedMonthlyPoint, rows]);
+    return buildBankYearOverYear(selectedMonthlyPoint.bankName, selectedMonthlyPoint.monthKey, categoryDateOfferScopedRows);
+  }, [selectedMonthlyPoint, categoryDateOfferScopedRows]);
 
   const bankRank = useMemo(() => {
     if (!selectedMonthlyPoint) return null;
@@ -2028,7 +2066,7 @@ export default function App() {
     if (!selectedSeasonalPoint) return null;
     const { month } = selectedSeasonalPoint;
     const relevantRowsForMonth = (year) =>
-      rows.filter(
+      categoryDateOfferScopedRows.filter(
         (r) =>
           r.monthKey !== "Unknown" &&
           Number(r.monthKey.split("-")[0]) === month &&
@@ -2042,24 +2080,24 @@ export default function App() {
     if (!yearsWithData.length) return null;
     const currentYear = yearsWithData[yearsWithData.length - 1];
     const monthKey = `${String(month).padStart(2, "0")}-${currentYear}`;
-    return buildAggregateAdjacentMonthInsight(bankFilter, monthKey, rows);
-  }, [selectedSeasonalPoint, seasonalYears, rows, bankFilter]);
+    return buildAggregateAdjacentMonthInsight(bankFilter, monthKey, categoryDateOfferScopedRows);
+  }, [selectedSeasonalPoint, seasonalYears, categoryDateOfferScopedRows, bankFilter]);
 
   const yearInsight = useMemo(() => {
     if (!selectedYearPoint) return null;
     const { year } = selectedYearPoint;
 
     const relevantRowsForYear = (y) =>
-      rows.filter(
+      categoryDateOfferScopedRows.filter(
         (r) =>
           r.monthKey !== "Unknown" &&
           Number(r.monthKey.split("-")[1]) === y &&
           (!bankFilter.length || bankFilter.includes(r.bankName)),
       );
 
-    const candidateYears = [...new Set(rows.filter((r) => r.monthKey !== "Unknown").map((r) => Number(r.monthKey.split("-")[1])))].sort(
-      (a, b) => a - b,
-    );
+    const candidateYears = [
+      ...new Set(categoryDateOfferScopedRows.filter((r) => r.monthKey !== "Unknown").map((r) => Number(r.monthKey.split("-")[1]))),
+    ].sort((a, b) => a - b);
     const yearsWithData = candidateYears.filter((y) => relevantRowsForYear(y).length > 0);
     const idx = yearsWithData.indexOf(year);
     const priorYear = idx > 0 ? yearsWithData[idx - 1] : null;
@@ -2074,7 +2112,7 @@ export default function App() {
     }
 
     return { year, priorYear, hasPrior: true, ...buildPairInsight(priorYear, year, relevantRowsForYear, admitsData.map) };
-  }, [selectedYearPoint, rows, bankFilter, admitsData]);
+  }, [selectedYearPoint, categoryDateOfferScopedRows, bankFilter, admitsData]);
 
   function handleViewDetails() {
     if (trendMode === "monthly") {
