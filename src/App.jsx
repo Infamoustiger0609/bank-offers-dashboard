@@ -35,9 +35,25 @@ const COLUMN_MAP = {
   date: "Date",
   transactionType: "Transaction Type",
   universalTransactions: "Universal Transactions",
+  admits: "Universal Total Admits",
+  universalTicketRevenue: "Universal Ticket Revenue",
+  universalTotalRevenue: "Universal Total Revenue",
 };
 
-const OPTIONAL_COLUMNS = new Set(["universalTransactions"]);
+const OPTIONAL_COLUMNS = new Set(["universalTransactions", "admits", "universalTicketRevenue", "universalTotalRevenue"]);
+
+const UPI_COLUMN_MAP = {
+  month: "Month",
+  bankName: "UPI Partner",
+  totalTickets: "Total No. of Tkts",
+  transactionTotal: "Total Amount (Rs.)",
+  discountAmount: "Overall Discount Amount (Rs.)",
+  inoxContribution: "PVR Discount Amount (Rs.)",
+  bankContribution: "Bank Discount",
+  discountedTransactions: "No TRNX",
+};
+
+const UPI_OPTIONAL_COLUMNS = new Set(["bankContribution", "discountedTransactions"]);
 
 const CHANNEL_COLORS = {
   Online: "#2563eb",
@@ -88,6 +104,8 @@ const EMPTY_KPIS = {
   netRevenue: 0,
   totalDiscount: 0,
   recoveryRate: 0,
+  ticketRevenue: 0,
+  totalTickets: 0,
 };
 
 function normalizeKey(value) {
@@ -107,24 +125,51 @@ function parseNumber(value) {
 
 function parseExcelDate(value) {
   if (!value && value !== 0) return null;
-  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+  const finalize = (date) => {
+    if (!date || Number.isNaN(date.getTime())) return null;
+    const year = date.getFullYear();
+    if (year < 2015 || year > 2035) return null;
+    return date;
+  };
+  if (value instanceof Date) return finalize(value);
   if (typeof value === "number") {
-    const date = new Date(Math.round((value - 25569) * 86400 * 1000));
-    return Number.isNaN(date.getTime()) ? null : date;
+    return finalize(new Date(Math.round((value - 25569) * 86400 * 1000)));
   }
   const raw = String(value).trim();
   if (!raw) return null;
   const parsed = new Date(raw);
-  if (!Number.isNaN(parsed.getTime())) return parsed;
+  if (!Number.isNaN(parsed.getTime())) return finalize(parsed);
   const parts = raw.split(/[/-]/).map((part) => Number(part.trim()));
   if (parts.length === 3) {
     const [day, month, year] = parts;
-    const date = new Date(year < 100 ? 2000 + year : year, (month || 1) - 1, day || 1);
-    return Number.isNaN(date.getTime()) ? null : date;
+    return finalize(new Date(year < 100 ? 2000 + year : year, (month || 1) - 1, day || 1));
   }
   return null;
 }
 
+function resolveUpiMonthDate(rawValue, previousDate) {
+  const direct = parseExcelDate(rawValue);
+  if (direct) return direct;
+  const raw = String(rawValue || "").trim();
+  if (!raw || !previousDate) return null;
+  const probe = new Date(`${raw} 1, 2000`);
+  if (Number.isNaN(probe.getTime())) return null;
+  const monthIndex = probe.getMonth();
+  let year = previousDate.getFullYear();
+  if (monthIndex <= previousDate.getMonth()) year += 1;
+  return new Date(year, monthIndex, 1);
+}
+
+function normalizeUpiPartnerName(rawName) {
+  const name = String(rawName || "").trim();
+  const key = name.toLowerCase();
+  if (key === "cred") return "CRED";
+  if (key === "moikwik" || key === "mobikwik" || key === "mobikwik upi cashback") return "MobiKwik";
+  if (key === "paytm" || key === "paytm upi cashback") return "Paytm";
+  if (key === "phonepe") return "PhonePe";
+  if (key === "airtel cashback upi") return "Airtel";
+  return name;
+}
 
 function formatCompactNumber(value) {
   const amount = Number(value || 0);
@@ -134,12 +179,12 @@ function formatCompactNumber(value) {
   return `${Math.round(amount)}`;
 }
 
-function formatInCrore(value) {
-  return `₹${(Number(value || 0) / 10000000).toFixed(3)} Cr`;
+function formatInLakh(value) {
+  return `₹${(Number(value || 0) / 100000).toFixed(2)} L`;
 }
 
-function formatCountInCrore(value) {
-  return `${(Number(value || 0) / 10000000).toFixed(3)} Cr`;
+function formatCountInLakh(value) {
+  return `${(Number(value || 0) / 100000).toFixed(2)} L`;
 }
 
 function formatInteger(value) {
@@ -161,7 +206,9 @@ function formatIsoDate(date) {
 
 function monthKeyFromDate(date) {
   if (!date) return "Unknown";
-  return `${String(date.getMonth() + 1).padStart(2, "0")}-${date.getFullYear()}`;
+  const year = date.getFullYear();
+  if (year < 2015 || year > 2035) return "Unknown";
+  return `${String(date.getMonth() + 1).padStart(2, "0")}-${year}`;
 }
 
 function getFiscalYearStart(date) {
@@ -261,20 +308,26 @@ function computeDelta(currentValue, priorValue) {
   return ((currentValue - priorValue) / priorValue) * 100;
 }
 
+function formatRupee(value) {
+  return `₹${Number(value || 0).toFixed(2)}`;
+}
+
 function computeRowTotals(list) {
   const raw = list.reduce(
     (acc, row) => {
       acc.revenue += row.transactionTotal;
       acc.discount += row.discountAmount;
       acc.transactions += row.discountedTransactions;
+      acc.ticketRevenue += row.ticketRevenue;
       return acc;
     },
-    { revenue: 0, discount: 0, transactions: 0 },
+    { revenue: 0, discount: 0, transactions: 0, ticketRevenue: 0 },
   );
   return {
     revenue: Number(raw.revenue.toFixed(5)),
     discount: Number(raw.discount.toFixed(5)),
     transactions: Number(raw.transactions.toFixed(5)),
+    ticketRevenue: Number(raw.ticketRevenue.toFixed(5)),
   };
 }
 
@@ -282,16 +335,57 @@ function computeDiscountRateNote(currentRate, priorRate) {
   if (currentRate === null || priorRate === null) return "Not enough data to compare discount rate.";
   const rateDelta = currentRate - priorRate;
   if (rateDelta > 2) return "Discount rate rose — growth came with a higher discount cost.";
-  if (rateDelta < -2) return "Discount rate improved alongside the change.";
+  if (rateDelta < -2) return "Efficiency uplift — discount rate improved, meaning offers are converting more cost-effectively.";
   return "Discount rate held steady.";
 }
 
 function computeVolumeValueNote(revenueDeltaPercent, txnDeltaPercent) {
   if (revenueDeltaPercent === null || txnDeltaPercent === null) return "Not enough data to compare volume and value.";
   const gap = revenueDeltaPercent - txnDeltaPercent;
-  if (gap > 15) return "Revenue grew faster than transaction count — likely fewer, higher-value transactions.";
+  if (gap > 15) return "Strong value uplift — revenue grew faster than transaction count, driven by higher-value transactions.";
   if (gap < -15) return "Transaction volume grew faster than revenue — lower average value per transaction.";
   return "Revenue and transaction volume moved together.";
+}
+
+function computeAdmitsNote(admitsDeltaPercent) {
+  if (admitsDeltaPercent === null) return "Not enough data to compare admits.";
+  if (Math.abs(admitsDeltaPercent) < 3) return "Admits held roughly steady.";
+  if (admitsDeltaPercent > 0) return `Healthy uplift in admits — up ${admitsDeltaPercent.toFixed(1)}% versus the prior period.`;
+  return `Admits fell ${Math.abs(admitsDeltaPercent).toFixed(1)}% versus the prior period.`;
+}
+
+function computeATVNote(atvDeltaPercent) {
+  if (atvDeltaPercent === null) return "Not enough data to compare ATV.";
+  if (Math.abs(atvDeltaPercent) < 3) return "ATV held roughly steady.";
+  if (atvDeltaPercent > 0) return `ATV uplift of ${atvDeltaPercent.toFixed(1)}% — customers spending more per visit.`;
+  return `ATV fell ${Math.abs(atvDeltaPercent).toFixed(1)}%.`;
+}
+
+function generateHeadlineInsight({ revenueDeltaPercent, admitsDeltaPercent, atvDeltaPercent }) {
+  if (revenueDeltaPercent === null) return null;
+  const revUp = revenueDeltaPercent > 0;
+  const admitsKnown = admitsDeltaPercent !== null;
+  const atvKnown = atvDeltaPercent !== null;
+  const admitsMovedOpposite = admitsKnown && Math.sign(admitsDeltaPercent) !== Math.sign(revenueDeltaPercent) && Math.abs(admitsDeltaPercent) > 3;
+  const admitsMovedSimilarly =
+    admitsKnown && Math.sign(admitsDeltaPercent) === Math.sign(revenueDeltaPercent) && Math.abs(admitsDeltaPercent - revenueDeltaPercent) < 15;
+
+  if (admitsKnown && admitsMovedOpposite) {
+    return `Revenue ${revUp ? `saw a strong uplift of ${revenueDeltaPercent.toFixed(1)}%` : `fell ${Math.abs(revenueDeltaPercent).toFixed(1)}%`} while admits moved the other way (${
+      admitsDeltaPercent > 0 ? "+" : ""
+    }${admitsDeltaPercent.toFixed(1)}%) — this performance looks specific to this bank/offer, not a footfall effect.`;
+  }
+  if (admitsKnown && admitsMovedSimilarly) {
+    return `Revenue and admits moved together (${revenueDeltaPercent.toFixed(1)}% vs ${admitsDeltaPercent.toFixed(
+      1,
+    )}%)${revUp ? " — a broad uplift across footfall and spend" : " — this looks like a broader footfall trend rather than something specific to this bank/offer"}.`;
+  }
+  if (atvKnown && Math.abs(atvDeltaPercent) > 10 && admitsKnown && Math.abs(admitsDeltaPercent) < 5) {
+    return `Admits were roughly flat, but average ticket value ${atvDeltaPercent > 0 ? `rose ${Math.abs(atvDeltaPercent).toFixed(1)}% — a strong per-visitor spend uplift` : `fell ${Math.abs(atvDeltaPercent).toFixed(1)}%`}${
+      revUp ? "" : ""
+    }.`;
+  }
+  return `Revenue ${revUp ? `saw an uplift of ${Math.abs(revenueDeltaPercent).toFixed(1)}%` : `fell ${Math.abs(revenueDeltaPercent).toFixed(1)}%`}. Admits/ATV data is incomplete for this period, so it isn't clear whether footfall or spend-per-visitor drove the change.`;
 }
 
 function renderClickableDot(dotProps, dataKey, onClick) {
@@ -306,7 +400,69 @@ function renderClickableDot(dotProps, dataKey, onClick) {
   );
 }
 
-function buildAdjacentMonthInsight(bankName, monthKey, allRows) {
+function renderDeltaBadge(value) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-bold ${
+        value === null
+          ? "bg-slate-100 text-slate-500"
+          : value > 0
+            ? "bg-emerald-50 text-emerald-600"
+            : value < 0
+              ? "bg-rose-50 text-rose-600"
+              : "bg-slate-100 text-slate-500"
+      }`}
+    >
+      {value === null ? "—" : `${value > 0 ? "▲" : value < 0 ? "▼" : "–"} ${Math.abs(value).toFixed(1)}%`}
+    </span>
+  );
+}
+
+function buildBankYearOverYear(bankName, monthKey, allRows) {
+  const [month, currentYear] = monthKey.split("-").map(Number);
+  const priorYear = currentYear - 1;
+  const revenueFor = (year) =>
+    allRows
+      .filter((r) => r.bankName === bankName && r.monthKey !== "Unknown" && Number(r.monthKey.split("-")[0]) === month && Number(r.monthKey.split("-")[1]) === year)
+      .reduce((sum, r) => sum + r.transactionTotal, 0);
+
+  const priorRevenue = revenueFor(priorYear);
+  const currentRevenue = revenueFor(currentYear);
+  if (!priorRevenue) return null;
+
+  return {
+    priorYear,
+    currentYear,
+    priorRevenue,
+    currentRevenue,
+    deltaPercent: ((currentRevenue - priorRevenue) / priorRevenue) * 100,
+  };
+}
+
+function buildAggregateAdjacentMonthInsight(banks, monthKey, allRows) {
+  const scopedRows = allRows.filter((row) => row.monthKey !== "Unknown" && (!banks.length || banks.includes(row.bankName)));
+  const monthKeysWithData = [...new Set(scopedRows.map((row) => row.monthKey))].sort((a, b) => {
+    const [am, ay] = a.split("-").map(Number);
+    const [bm, by] = b.split("-").map(Number);
+    return new Date(ay, am - 1, 1) - new Date(by, bm - 1, 1);
+  });
+  const idx = monthKeysWithData.indexOf(monthKey);
+  const priorMonthKey = idx > 0 ? monthKeysWithData[idx - 1] : null;
+  if (!priorMonthKey) return null;
+
+  const currentRevenue = scopedRows.filter((r) => r.monthKey === monthKey).reduce((sum, r) => sum + r.transactionTotal, 0);
+  const priorRevenue = scopedRows.filter((r) => r.monthKey === priorMonthKey).reduce((sum, r) => sum + r.transactionTotal, 0);
+  if (!priorRevenue) return null;
+
+  return {
+    priorMonthKey,
+    currentRevenue,
+    priorRevenue,
+    deltaPercent: ((currentRevenue - priorRevenue) / priorRevenue) * 100,
+  };
+}
+
+function buildAdjacentMonthInsight(bankName, monthKey, allRows, admitsMap) {
   const bankRows = allRows.filter((row) => row.bankName === bankName && row.monthKey !== "Unknown");
   const monthKeysWithData = [...new Set(bankRows.map((row) => row.monthKey))].sort((a, b) => {
     const [am, ay] = a.split("-").map(Number);
@@ -318,15 +474,21 @@ function buildAdjacentMonthInsight(bankName, monthKey, allRows) {
 
   const currentTotals = computeRowTotals(bankRows.filter((row) => row.monthKey === monthKey));
   const currentDiscountRate = currentTotals.revenue ? (currentTotals.discount / currentTotals.revenue) * 100 : null;
+  const currentAdmits = admitsMap.get(monthKey) || 0;
+  const currentATV = currentAdmits ? currentTotals.ticketRevenue / currentAdmits : null;
 
   if (!priorMonthKey) {
-    return { hasPrior: false, currentTotals, currentDiscountRate };
+    return { hasPrior: false, currentTotals, currentDiscountRate, currentAdmits, currentATV };
   }
 
   const priorTotals = computeRowTotals(bankRows.filter((row) => row.monthKey === priorMonthKey));
   const priorDiscountRate = priorTotals.revenue ? (priorTotals.discount / priorTotals.revenue) * 100 : null;
   const totalDeltaPercent = priorTotals.revenue ? ((currentTotals.revenue - priorTotals.revenue) / priorTotals.revenue) * 100 : null;
   const txnDeltaPercent = priorTotals.transactions ? ((currentTotals.transactions - priorTotals.transactions) / priorTotals.transactions) * 100 : null;
+  const priorAdmits = admitsMap.get(priorMonthKey) || 0;
+  const admitsDeltaPercent = priorAdmits ? ((currentAdmits - priorAdmits) / priorAdmits) * 100 : null;
+  const priorATV = priorAdmits ? priorTotals.ticketRevenue / priorAdmits : null;
+  const atvDeltaPercent = priorATV ? ((currentATV - priorATV) / priorATV) * 100 : null;
 
   return {
     hasPrior: true,
@@ -339,6 +501,15 @@ function buildAdjacentMonthInsight(bankName, monthKey, allRows) {
     txnDeltaPercent,
     discountRateNote: computeDiscountRateNote(currentDiscountRate, priorDiscountRate),
     volumeValueNote: computeVolumeValueNote(totalDeltaPercent, txnDeltaPercent),
+    currentAdmits,
+    priorAdmits,
+    admitsDeltaPercent,
+    admitsNote: computeAdmitsNote(admitsDeltaPercent),
+    currentATV,
+    priorATV,
+    atvDeltaPercent,
+    atvNote: computeATVNote(atvDeltaPercent),
+    headline: generateHeadlineInsight({ revenueDeltaPercent: totalDeltaPercent, admitsDeltaPercent, atvDeltaPercent }),
   };
 }
 
@@ -354,12 +525,12 @@ function inferOfferType(offerName) {
   return "Offer";
 }
 
-function buildColumnLookup(headers) {
+function buildColumnLookup(headers, columnMap = COLUMN_MAP) {
   const normalizedHeaders = {};
   headers.forEach((header) => {
     normalizedHeaders[normalizeKey(header)] = header;
   });
-  return Object.entries(COLUMN_MAP).reduce((lookup, [field, expected]) => {
+  return Object.entries(columnMap).reduce((lookup, [field, expected]) => {
     lookup[field] = normalizedHeaders[normalizeKey(expected)] || null;
     return lookup;
   }, {});
@@ -389,6 +560,7 @@ function parseWorkbookRows(rows) {
       id: `${bankName || "bank"}-${offerName || "offer"}-${index}`,
       offerName: offerName || "Unknown Offer",
       bankName: bankName || "Unknown Bank",
+      paymentCategory: "Card",
       discountedTransactions: parseNumber(lookup.discountedTransactions ? row[lookup.discountedTransactions] : 0),
       freeTickets: parseNumber(lookup.freeTickets ? row[lookup.freeTickets] : 0),
       totalTickets: parseNumber(lookup.totalTickets ? row[lookup.totalTickets] : 0),
@@ -409,23 +581,104 @@ function parseWorkbookRows(rows) {
         lookup.universalTransactions && row[lookup.universalTransactions] !== undefined && row[lookup.universalTransactions] !== ""
           ? Number(row[lookup.universalTransactions])
           : null,
+      admits:
+        lookup.admits && row[lookup.admits] !== undefined && row[lookup.admits] !== "" ? Number(row[lookup.admits]) : null,
+      universalTicketRevenue:
+        lookup.universalTicketRevenue && row[lookup.universalTicketRevenue] !== undefined && row[lookup.universalTicketRevenue] !== ""
+          ? Number(row[lookup.universalTicketRevenue])
+          : null,
+      universalTotalRevenue:
+        lookup.universalTotalRevenue && row[lookup.universalTotalRevenue] !== undefined && row[lookup.universalTotalRevenue] !== ""
+          ? Number(row[lookup.universalTotalRevenue])
+          : null,
     };
   });
 
   return { parsedRows, missingColumns };
 }
 
-function getUniversalTransactionsByMonth(rows) {
+function buildUpiRow(rawRow, lookup, index, previousDate) {
+  const date = resolveUpiMonthDate(lookup.month ? rawRow[lookup.month] : null, previousDate);
+  const rawBankName = String(rawRow[lookup.bankName] || "").trim();
+  const bankName = normalizeUpiPartnerName(rawBankName);
+  const transactionTotal = parseNumber(lookup.transactionTotal ? rawRow[lookup.transactionTotal] : 0);
+  const discountAmount = lookup.discountAmount ? parseNumber(rawRow[lookup.discountAmount]) : 0;
+  const inoxContribution = lookup.inoxContribution ? parseNumber(rawRow[lookup.inoxContribution]) : 0;
+  const bankContribution = lookup.bankContribution
+    ? parseNumber(rawRow[lookup.bankContribution])
+    : Math.max(0, discountAmount - inoxContribution);
+  const totalTickets = lookup.totalTickets ? parseNumber(rawRow[lookup.totalTickets]) : 0;
+  const discountedTransactions = lookup.discountedTransactions ? parseNumber(rawRow[lookup.discountedTransactions]) : totalTickets;
+  const offerName = `${bankName || "Unknown Bank"} UPI Cashback`;
+
+  return {
+    id: `${bankName || "upi"}-${offerName}-${index}`,
+    offerName,
+    bankName: bankName || "Unknown Bank",
+    paymentCategory: "UPI",
+    discountedTransactions,
+    freeTickets: 0,
+    totalTickets,
+    transactionTotal,
+    ticketRevenue: transactionTotal,
+    fnbRevenue: 0,
+    amountPaid: transactionTotal - discountAmount,
+    discountAmount,
+    bankContribution,
+    inoxContribution,
+    convFees: 0,
+    date,
+    dateLabel: formatDateLabel(date),
+    monthKey: monthKeyFromDate(date),
+    offerType: "UPI Cashback",
+    transactionType: "Online",
+    universalTransactions: null,
+    admits: null,
+    universalTicketRevenue: null,
+    universalTotalRevenue: null,
+  };
+}
+
+function parseUpiWorkbookRows(workbook) {
+  const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+  const rawRows = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
+  if (!rawRows.length) {
+    return {
+      parsedRows: [],
+      missingColumns: Object.entries(UPI_COLUMN_MAP)
+        .filter(([field]) => !UPI_OPTIONAL_COLUMNS.has(field))
+        .map(([, value]) => value),
+    };
+  }
+
+  const lookup = buildColumnLookup(Object.keys(rawRows[0]), UPI_COLUMN_MAP);
+  const missingColumns = Object.entries(lookup)
+    .filter(([field, column]) => !column && !UPI_OPTIONAL_COLUMNS.has(field))
+    .map(([field]) => UPI_COLUMN_MAP[field]);
+
+  let previousDate = null;
+  const parsedRows = rawRows.map((rawRow, index) => {
+    const row = buildUpiRow(rawRow, lookup, index, previousDate);
+    if (row.date) previousDate = row.date;
+    return row;
+  });
+
+  return { parsedRows, missingColumns };
+}
+
+function getMonthlyReferenceValue(rows, field) {
   const map = new Map();
   const inconsistent = new Set();
   rows.forEach((row) => {
-    if (row.universalTransactions === null || row.monthKey === "Unknown") return;
-    if (map.has(row.monthKey) && map.get(row.monthKey) !== row.universalTransactions) {
-      inconsistent.add(row.monthKey);
-    }
-    map.set(row.monthKey, row.universalTransactions);
+    if (row[field] === null || row.monthKey === "Unknown") return;
+    if (map.has(row.monthKey) && map.get(row.monthKey) !== row[field]) inconsistent.add(row.monthKey);
+    map.set(row.monthKey, row[field]);
   });
   return { map, inconsistent };
+}
+
+function sumAdmitsForMonths(monthKeys, admitsMap) {
+  return [...new Set(monthKeys)].reduce((sum, key) => sum + (admitsMap.get(key) || 0), 0);
 }
 
 function formatMonthKeyLabel(monthKey) {
@@ -440,10 +693,21 @@ function computeKpis(rows) {
       acc.grossRevenue += row.transactionTotal;
       acc.netRevenue += row.amountPaid;
       acc.totalDiscount += row.discountAmount;
+      acc.ticketRevenue += row.ticketRevenue;
+      acc.totalTickets += row.totalTickets || 0;
       return acc;
     },
     { ...EMPTY_KPIS },
   );
+}
+
+function filterGroup(rows, banks, startStr, endStr) {
+  if (!startStr || !endStr) return [];
+  const [sy, sm] = startStr.split("-").map(Number);
+  const [ey, em] = endStr.split("-").map(Number);
+  const start = new Date(sy, sm - 1, 1);
+  const end = new Date(ey, em, 0, 23, 59, 59, 999);
+  return rows.filter((r) => r.date && r.date >= start && r.date <= end && (!banks.length || banks.includes(r.bankName)));
 }
 
 function aggregateBanks(rows) {
@@ -463,12 +727,54 @@ function aggregateBanks(rows) {
   return [...grouped.values()].sort((a, b) => b.totalRevenue - a.totalRevenue);
 }
 
+function normalizeOfferChannel(offerName) {
+  if (/F&B/i.test(offerName)) return offerName;
+
+  let name = offerName.trim();
+
+  // Strip trailing channel/sub-channel suffixes (repeat in case of nested suffixes)
+  const channelSuffixPattern = /\s*-\s*(Box Office|Digital Platforms|Online|Offline|Refuel)\s*$/i;
+  while (channelSuffixPattern.test(name)) {
+    name = name.replace(channelSuffixPattern, "").trim();
+  }
+
+  // Strip everything up through the last "<...> Card -" prefix (bank name + card type),
+  // e.g. "DBS Bank Credit & Debit Card - " or "DBS Debit Card - "
+  name = name.replace(/^.*\bCard\b\s*[-–]\s*/i, "").trim();
+
+  // Normalize spacing around % signs so "20 % off" and "20% off" match
+  name = name.replace(/(\d+)\s*%/g, "$1%");
+
+  // Normalize spacing around colons so "Offer:Details" and "Offer :  Details" match
+  name = name.replace(/:\s*/g, ": ");
+
+  // Collapse any repeated whitespace
+  name = name.replace(/\s+/g, " ").trim();
+
+  return name;
+}
+
+const OFFER_ALIAS_MAP = {
+  "Kotak Cashback+ Credit Card – BOGO Festive Offer - Digital Platforms": "Kotak BOGO Festive Offer",
+  "Kotak Solitaire Credit Card – BOGO Festive Offer - Digital Platforms": "Kotak BOGO Festive Offer",
+  "Kotak PVR INOX Credit Card 5% Off on Movie Ticket": "Kotak PVR INOX Credit Card 5% Off on Tickets",
+  "Buy One Get One": "Buy 1 Get 1",
+  "J&K Bank Mastercard DC - 50% off Movie-Srinagar": "J&K Bank Mastercard - 50% off Movie-Srinagar",
+  "J&K Bank Mastercard CC - 50% off Movie-Srinagar": "J&K Bank Mastercard - 50% off Movie-Srinagar",
+  // Add more raw-name -> canonical-name pairs here as you find them.
+};
+
+function canonicalOfferName(offerName) {
+  return OFFER_ALIAS_MAP[offerName] || normalizeOfferChannel(offerName);
+}
+
 function aggregateOffers(rows) {
   const grouped = new Map();
   rows.forEach((row) => {
-    const key = `${row.offerName}::${row.bankName}`;
+    const canonicalName = canonicalOfferName(row.offerName);
+    const key = `${canonicalName}::${row.bankName}`;
     const current = grouped.get(key) || {
-      offerName: row.offerName,
+      offerName: canonicalName,
       bankName: row.bankName,
       revenue: 0,
       netRevenue: 0,
@@ -483,13 +789,14 @@ function aggregateOffers(rows) {
       convFees: 0,
       dates: new Set(),
       offerType: row.offerType,
+      paymentCategory: row.paymentCategory,
     };
     current.revenue += row.transactionTotal;
     current.netRevenue += row.amountPaid;
     current.discount += row.discountAmount;
     current.transactions += row.discountedTransactions;
     current.freeTickets += row.freeTickets;
-    current.totalTickets += row.totalTickets;
+    current.totalTickets += row.totalTickets || 0;
     current.ticketRevenue += row.ticketRevenue;
     current.fnbRevenue += row.fnbRevenue;
     current.bankContribution += row.bankContribution;
@@ -521,7 +828,7 @@ function aggregateBubbleData(rows, colorMap) {
 function aggregateChannelRevenue(rows) {
   const grouped = new Map();
   rows.forEach((row) => {
-    const key = row.transactionType || "Unknown";
+    const key = ["Online", "Offline - Box Office", "Offline - F&B"].includes(row.transactionType) ? row.transactionType : "Offline - Box Office";
     grouped.set(key, (grouped.get(key) || 0) + row.transactionTotal);
   });
   return [...grouped.entries()]
@@ -609,58 +916,6 @@ function StatCard({ title, value, subtitle, color, icon, delta, extra }) {
         </p>
       ) : null}
       {extra ? <div className="mt-2 space-y-0.5">{extra}</div> : null}
-    </div>
-  );
-}
-
-function UploadPanel({ onFileChange, dragActive, setDragActive, fileName, error, onRemoveFile, inputRef }) {
-  function handleDrop(event) {
-    event.preventDefault();
-    setDragActive(false);
-    const [file] = [...(event.dataTransfer.files || [])];
-    if (file) onFileChange(file);
-  }
-
-  return (
-    <div className="flex h-[90px] flex-col justify-center rounded-2xl border border-white/60 bg-white/90 p-3 shadow-soft">
-      <div
-        className={`flex cursor-pointer items-center justify-between gap-2 rounded-xl border border-dashed px-2.5 py-1.5 text-left transition ${dragActive ? "border-accentBlue bg-blue-50" : "border-slate-200 bg-slate-50/70 hover:border-accentGreen hover:bg-emerald-50"}`}
-        onClick={() => inputRef.current?.click()}
-        onDragOver={(event) => {
-          event.preventDefault();
-          setDragActive(true);
-        }}
-        onDragLeave={() => setDragActive(false)}
-        onDrop={handleDrop}
-      >
-        <input
-          ref={inputRef}
-          type="file"
-          accept=".xlsx,.xls,.csv"
-          className="hidden"
-          onChange={(event) => {
-            const [file] = [...(event.target.files || [])];
-            if (file) onFileChange(file);
-          }}
-        />
-        <div className="min-w-0">
-          <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-textMuted">Upload File</p>
-          <p className="truncate text-xs font-semibold text-textMain">{fileName || "Drag/drop or click to upload"}</p>
-        </div>
-        {fileName ? (
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              onRemoveFile();
-            }}
-            className="flex-shrink-0 rounded-full border border-rose-200 bg-rose-50 px-2 py-1 text-[10px] font-bold text-rose-600 hover:bg-rose-100"
-          >
-            ✕ Remove
-          </button>
-        ) : null}
-      </div>
-      {error ? <p className="mt-1 truncate text-[10px] font-semibold text-rose-600">{error}</p> : null}
     </div>
   );
 }
@@ -859,28 +1114,33 @@ function OfferModal({ offer, onClose }) {
           </button>
         </div>
         <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <MetricBlock title="Revenue" value={formatInCrore(offer.revenue)} />
-          <MetricBlock title="Net Revenue" value={formatInCrore(offer.netRevenue)} />
-          <MetricBlock title="Discount" value={formatInCrore(offer.discount)} />
-          <MetricBlock title="Transactions" value={formatCountInCrore(offer.transactions)} />
-          <MetricBlock title="Free Tickets" value={formatCountInCrore(offer.freeTickets)} />
+          <MetricBlock title="Revenue" value={formatInLakh(offer.revenue)} />
+          <MetricBlock title="Net Revenue" value={formatInLakh(offer.netRevenue)} />
+          <MetricBlock title="Discount" value={formatInLakh(offer.discount)} />
+          <MetricBlock title="Transactions" value={formatCountInLakh(offer.transactions)} />
+          <MetricBlock title="Free Tickets" value={formatCountInLakh(offer.freeTickets)} />
         </div>
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
           <div className="rounded-2xl border border-borderSoft p-4">
             <p className="text-xs font-bold uppercase tracking-[0.18em] text-textMuted">Ticket & F&B</p>
-            <p className="mt-3 text-sm font-semibold text-textMain">Ticket Revenue: {formatInCrore(offer.ticketRevenue)}</p>
-            <p className="mt-2 text-sm font-semibold text-textMain">F&B Revenue: {formatInCrore(offer.fnbRevenue)}</p>
-            <p className="mt-2 text-sm font-semibold text-textMain">Total Tickets: {formatCountInCrore(offer.totalTickets)}</p>
+            <p className="mt-3 text-sm font-semibold text-textMain">Ticket Revenue: {formatInLakh(offer.ticketRevenue)}</p>
+            <p className="mt-2 text-sm font-semibold text-textMain">F&B Revenue: {formatInLakh(offer.fnbRevenue)}</p>
+            <p className="mt-2 text-sm font-semibold text-textMain">Total Tickets: {formatCountInLakh(offer.totalTickets)}</p>
+            {offer.paymentCategory === "UPI" ? (
+              <p className="mt-2 text-xs text-textMuted">
+                UPI transaction counts are estimated from ticket count (~57% of source rows had no separate transaction figure).
+              </p>
+            ) : null}
           </div>
           <div className="rounded-2xl border border-borderSoft p-4">
             <p className="text-xs font-bold uppercase tracking-[0.18em] text-textMuted">Contribution Split</p>
             <p className="mt-3 text-sm font-semibold text-textMain">
-              Bank: {formatInCrore(offer.bankContribution)} ({offer.discount ? ((offer.bankContribution / offer.discount) * 100).toFixed(0) : 0}%)
+              Bank: {formatInLakh(offer.bankContribution)} ({offer.discount ? ((offer.bankContribution / offer.discount) * 100).toFixed(0) : 0}%)
             </p>
             <p className="mt-2 text-sm font-semibold text-textMain">
-              Inox: {formatInCrore(offer.inoxContribution)} ({offer.discount ? ((offer.inoxContribution / offer.discount) * 100).toFixed(0) : 0}%)
+              Inox: {formatInLakh(offer.inoxContribution)} ({offer.discount ? ((offer.inoxContribution / offer.discount) * 100).toFixed(0) : 0}%)
             </p>
-            <p className="mt-2 text-sm font-semibold text-textMain">Conv. Fees: {formatInCrore(offer.convFees)}</p>
+            <p className="mt-2 text-sm font-semibold text-textMain">Conv. Fees: {formatInLakh(offer.convFees)}</p>
           </div>
         </div>
         <div className="mt-4 rounded-2xl border border-borderSoft p-4">
@@ -908,7 +1168,7 @@ function BankModal({ bank, offersEntry, discountEntry, onClose }) {
       >
         <div className="flex items-start justify-between gap-4">
           <div>
-            <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Bank Scorecard</p>
+            <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Bank / UPI Scorecard</p>
             <h3 className="mt-2 font-display text-2xl font-bold text-textMain">{bank.bankName}</h3>
             <p className="mt-2 inline-flex rounded-full bg-blue-50 px-3 py-1 text-xs font-bold text-accentBlue">{formatInteger(offers.length)} offers</p>
           </div>
@@ -917,9 +1177,9 @@ function BankModal({ bank, offersEntry, discountEntry, onClose }) {
           </button>
         </div>
         <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <MetricBlock title="Total Revenue" value={formatInCrore(bank.totalRevenue)} />
-          <MetricBlock title="Discount Cost" value={formatInCrore(bank.discountCost)} />
-          <MetricBlock title="Total Transactions" value={formatCountInCrore(bank.totalTransactions)} />
+          <MetricBlock title="Total Revenue" value={formatInLakh(bank.totalRevenue)} />
+          <MetricBlock title="Discount Cost" value={formatInLakh(bank.discountCost)} />
+          <MetricBlock title="Total Transactions" value={formatCountInLakh(bank.totalTransactions)} />
         </div>
         <div className="mt-4 grid gap-4 lg:grid-cols-2">
           <div className="rounded-2xl border border-borderSoft p-4">
@@ -950,12 +1210,12 @@ function BankModal({ bank, offersEntry, discountEntry, onClose }) {
           <div className="rounded-2xl border border-borderSoft p-4">
             <p className="text-xs font-bold uppercase tracking-[0.18em] text-textMuted">Discount Split - Bank vs PVR</p>
             <p className="mt-3 text-sm font-semibold text-textMain">
-              Bank: {formatInCrore(discountEntry?.bankDiscount || 0)} ({(discountEntry?.bankPercent || 0).toFixed(0)}%)
+              Bank: {formatInLakh(discountEntry?.bankDiscount || 0)} ({(discountEntry?.bankPercent || 0).toFixed(0)}%)
             </p>
             <p className="mt-2 text-sm font-semibold text-textMain">
-              PVR: {formatInCrore(discountEntry?.pvrDiscount || 0)} ({(discountEntry?.pvrPercent || 0).toFixed(0)}%)
+              PVR: {formatInLakh(discountEntry?.pvrDiscount || 0)} ({(discountEntry?.pvrPercent || 0).toFixed(0)}%)
             </p>
-            <p className="mt-2 text-sm font-semibold text-textMain">Total: {formatInCrore(discountEntry?.totalDiscount || 0)}</p>
+            <p className="mt-2 text-sm font-semibold text-textMain">Total: {formatInLakh(discountEntry?.totalDiscount || 0)}</p>
           </div>
         </div>
       </div>
@@ -963,7 +1223,15 @@ function BankModal({ bank, offersEntry, discountEntry, onClose }) {
   );
 }
 
-function OffersByBankModal({ offersByBank, totalOfferCountByBank, expandedOfferBank, onToggleBank, onClose }) {
+function OffersByBankModal({
+  offersByBank,
+  totalOfferCountByBank,
+  expandedOfferBank,
+  onToggleBank,
+  onClose,
+  heading = "Total Offers by Each Bank",
+  entityNoun = "banks",
+}) {
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/40 px-4 backdrop-blur-sm" onClick={onClose}>
       <div
@@ -973,9 +1241,9 @@ function OffersByBankModal({ offersByBank, totalOfferCountByBank, expandedOfferB
         <div className="flex items-start justify-between gap-4">
           <div>
             <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Info Section</p>
-            <h3 className="mt-2 font-display text-2xl font-bold text-textMain">Total Offers by Each Bank</h3>
+            <h3 className="mt-2 font-display text-2xl font-bold text-textMain">{heading}</h3>
             <p className="mt-2 text-sm font-semibold text-textMuted">
-              {formatInteger(totalOfferCountByBank)} total offers across {formatInteger(offersByBank.length)} banks
+              {formatInteger(totalOfferCountByBank)} total offers across {formatInteger(offersByBank.length)} {entityNoun}
             </p>
           </div>
           <button type="button" onClick={onClose} className="rounded-full border border-borderSoft px-3 py-2 text-sm font-bold text-textMuted hover:bg-slate-50">
@@ -1024,9 +1292,9 @@ function OffersByBankModal({ offersByBank, totalOfferCountByBank, expandedOfferB
                                     {offer.startLabel} to {offer.endLabel}
                                   </td>
                                   <td className="px-4 py-3 font-semibold text-textMain">
-                                    Bank: {formatInCrore(offer.bankDiscount)}
+                                    Bank: {formatInLakh(offer.bankDiscount)}
                                     <br />
-                                    PVR: {formatInCrore(offer.pvrDiscount)}
+                                    PVR: {formatInLakh(offer.pvrDiscount)}
                                   </td>
                                 </tr>
                               )) : (
@@ -1045,7 +1313,7 @@ function OffersByBankModal({ offersByBank, totalOfferCountByBank, expandedOfferB
                 );
               }) : (
                 <div className="px-4 py-10 text-center font-semibold text-textMuted">
-                  Upload data to view total offers by bank.
+                  Upload data to view total offers by {entityNoun.slice(0, -1)}.
                 </div>
               )}
             </div>
@@ -1067,16 +1335,16 @@ function DiscountSplitTooltip({ active, payload, label }) {
     >
       <p className="text-sm font-bold text-textMain">{label}</p>
       <p className="mt-1 text-sm font-semibold text-textMain">
-        Bank Contribution: {formatInCrore(data.bankDiscount)} ({data.bankPercent.toFixed(1)}%)
+        Bank Contribution: {formatInLakh(data.bankDiscount)} ({data.bankPercent.toFixed(1)}%)
       </p>
       <p className="mt-1 text-sm font-semibold text-textMain">
-        PVR Contribution: {formatInCrore(data.pvrDiscount)} ({data.pvrPercent.toFixed(1)}%)
+        PVR Contribution: {formatInLakh(data.pvrDiscount)} ({data.pvrPercent.toFixed(1)}%)
       </p>
     </div>
   );
 }
 
-function MonthlyTrendTooltip({ active, payload, label, formatValue = formatInCrore }) {
+function MonthlyTrendTooltip({ active, payload, label, formatValue = formatInLakh }) {
   if (!active || !payload?.length) return null;
 
   return (
@@ -1110,15 +1378,20 @@ export default function App() {
   const [error, setError] = useState("");
   const [missingColumns, setMissingColumns] = useState([]);
   const [dragActive, setDragActive] = useState(false);
+  const [upiFileName, setUpiFileName] = useState("");
+  const [upiError, setUpiError] = useState("");
+  const [upiDragActive, setUpiDragActive] = useState(false);
   const [dateFilter, setDateFilter] = useState([]);
   const [bankFilter, setBankFilter] = useState([]);
   const [offerFilter, setOfferFilter] = useState([]);
+  const [paymentCategoryFilter, setPaymentCategoryFilter] = useState("all"); // "all" | "card" | "upi"
   const [selectedOffer, setSelectedOffer] = useState(null);
-  const [selectedChartBanks, setSelectedChartBanks] = useState([]);
   const [selectedBank, setSelectedBank] = useState(null);
   const [hoveredBank, setHoveredBank] = useState(null);
   const [showOffersByBank, setShowOffersByBank] = useState(false);
   const [expandedOfferBank, setExpandedOfferBank] = useState(null);
+  const [showOffersByUpi, setShowOffersByUpi] = useState(false);
+  const [expandedOfferUpiPartner, setExpandedOfferUpiPartner] = useState(null);
   const [comparisonMode, setComparisonMode] = useState("none");
   const [trendMode, setTrendMode] = useState("monthly");
   const [seasonalMetric, setSeasonalMetric] = useState("revenue");
@@ -1129,7 +1402,14 @@ export default function App() {
   const [bankSortDir, setBankSortDir] = useState("desc");
   const [offerSortKey, setOfferSortKey] = useState(null);
   const [offerSortDir, setOfferSortDir] = useState("desc");
+  const [groupABanks, setGroupABanks] = useState([]);
+  const [groupADateStart, setGroupADateStart] = useState("");
+  const [groupADateEnd, setGroupADateEnd] = useState("");
+  const [groupBBanks, setGroupBBanks] = useState([]);
+  const [groupBDateStart, setGroupBDateStart] = useState("");
+  const [groupBDateEnd, setGroupBDateEnd] = useState("");
   const fileInputRef = useRef(null);
+  const upiFileInputRef = useRef(null);
 
   const banks = useMemo(() => [...new Set(rows.map((row) => row.bankName))].sort(), [rows]);
   const offers = useMemo(() => [...new Set(rows.map((row) => row.offerName))].sort(), [rows]);
@@ -1183,14 +1463,10 @@ export default function App() {
   );
 
   useEffect(() => {
-    setSelectedChartBanks((current) => current.filter((bank) => banks.includes(bank)));
-  }, [banks]);
-
-  useEffect(() => {
     setSelectedSeasonalPoint(null);
     setSelectedMonthlyPoint(null);
     setSelectedYearPoint(null);
-  }, [seasonalMetric, trendMode, selectedChartBanks]);
+  }, [seasonalMetric, trendMode, bankFilter]);
 
   useEffect(() => {
     setDateFilter(dates);
@@ -1216,28 +1492,25 @@ export default function App() {
         const worksheet = workbook.Sheets[workbook.SheetNames[0]];
         const jsonRows = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
         if (!jsonRows.length) {
-          setRows([]);
           setError("The uploaded file is empty.");
           return;
         }
         const { parsedRows, missingColumns: missing } = parseWorkbookRows(jsonRows);
-        setRows(parsedRows);
+        setRows((current) => [...current.filter((r) => r.paymentCategory === "UPI"), ...parsedRows]);
         setMissingColumns(missing);
         setSelectedOffer(null);
       } catch {
-        setRows([]);
         setError("Unable to parse this file. Please upload a valid Excel sheet with the expected columns.");
       }
     };
     reader.onerror = () => {
-      setRows([]);
       setError("There was a problem reading the file.");
     };
     reader.readAsArrayBuffer(file);
   }
 
   function handleRemoveFile() {
-    setRows([]);
+    setRows((current) => current.filter((r) => r.paymentCategory === "UPI"));
     setFileName("");
     setError("");
     setMissingColumns([]);
@@ -1246,8 +1519,40 @@ export default function App() {
     setOfferFilter([]);
     setSelectedOffer(null);
     setSelectedBank(null);
-    setSelectedChartBanks([]);
     if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function handleUpiFileChange(file) {
+    setUpiFileName(file.name);
+    setUpiError("");
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const workbook = XLSX.read(event.target?.result, { type: "array" });
+        const { parsedRows, missingColumns: missing } = parseUpiWorkbookRows(workbook);
+        if (!parsedRows.length) {
+          setUpiError("The uploaded file is empty.");
+          return;
+        }
+        setRows((current) => [...current.filter((r) => r.paymentCategory !== "UPI"), ...parsedRows]);
+        setUpiError(missing.length ? `Missing columns were treated as zero: ${missing.join(", ")}` : "");
+        setSelectedOffer(null);
+      } catch {
+        setUpiError("Unable to parse this file. Please upload a valid Excel sheet with the expected columns.");
+      }
+    };
+    reader.onerror = () => {
+      setUpiError("There was a problem reading the file.");
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  function handleRemoveUpiFile() {
+    setRows((current) => current.filter((r) => r.paymentCategory !== "UPI"));
+    setUpiFileName("");
+    setUpiError("");
+    if (upiFileInputRef.current) upiFileInputRef.current.value = "";
   }
 
   function applyDateRange(startStr, endStr) {
@@ -1265,9 +1570,11 @@ export default function App() {
         const matchesDate = dateFilter.includes(row.dateLabel);
         const matchesBank = bankFilter.includes(row.bankName);
         const matchesOffer = offerFilter.includes(row.offerName);
-        return matchesDate && matchesBank && matchesOffer;
+        const matchesPaymentCategory =
+          paymentCategoryFilter === "all" || row.paymentCategory === (paymentCategoryFilter === "card" ? "Card" : "UPI");
+        return matchesDate && matchesBank && matchesOffer && matchesPaymentCategory;
       }),
-    [rows, dateFilter, bankFilter, offerFilter],
+    [rows, dateFilter, bankFilter, offerFilter, paymentCategoryFilter],
   );
 
   const bankOfferFilteredRows = useMemo(
@@ -1275,9 +1582,11 @@ export default function App() {
       rows.filter((row) => {
         const matchesBank = bankFilter.includes(row.bankName);
         const matchesOffer = offerFilter.includes(row.offerName);
-        return matchesBank && matchesOffer;
+        const matchesPaymentCategory =
+          paymentCategoryFilter === "all" || row.paymentCategory === (paymentCategoryFilter === "card" ? "Card" : "UPI");
+        return matchesBank && matchesOffer && matchesPaymentCategory;
       }),
-    [rows, bankFilter, offerFilter],
+    [rows, bankFilter, offerFilter, paymentCategoryFilter],
   );
 
   const kpis = useMemo(() => {
@@ -1285,28 +1594,73 @@ export default function App() {
     return { ...base, recoveryRate: safeRatio(base.netRevenue, base.grossRevenue) };
   }, [filteredRows]);
 
-  const universalData = useMemo(() => getUniversalTransactionsByMonth(rows), [rows]);
+  const cardRows = useMemo(() => filteredRows.filter((r) => r.paymentCategory === "Card"), [filteredRows]);
+  const upiRows = useMemo(() => filteredRows.filter((r) => r.paymentCategory === "UPI"), [filteredRows]);
 
-  const penetrationData = useMemo(() => {
+  const activeBanks = useMemo(() => [...new Set(filteredRows.map((r) => r.bankName))], [filteredRows]);
+  const activeCardBanks = useMemo(() => activeBanks.filter((b) => cardRows.some((r) => r.bankName === b)), [activeBanks, cardRows]);
+  const activeUpiPartners = useMemo(() => activeBanks.filter((b) => upiRows.some((r) => r.bankName === b)), [activeBanks, upiRows]);
+
+  const universalData = useMemo(() => getMonthlyReferenceValue(rows, "universalTransactions"), [rows]);
+  const admitsData = useMemo(() => getMonthlyReferenceValue(rows, "admits"), [rows]);
+  const universalTicketRevenueData = useMemo(() => getMonthlyReferenceValue(rows, "universalTicketRevenue"), [rows]);
+  const universalTotalRevenueData = useMemo(() => getMonthlyReferenceValue(rows, "universalTotalRevenue"), [rows]);
+
+  const activeAdmitsTotal = useMemo(() => {
     const activeMonths = [...new Set(filteredRows.map((row) => row.monthKey).filter((key) => key !== "Unknown"))];
-    const missingMonths = activeMonths.filter((key) => !universalData.map.has(key));
-    const universalTotal = activeMonths.reduce((sum, key) => sum + (universalData.map.get(key) || 0), 0);
-    const percent = universalTotal ? (kpis.totalTransactions / universalTotal) * 100 : null;
-    return { percent, universalTotal, missingMonths, hasAnyData: universalData.map.size > 0 };
-  }, [filteredRows, universalData, kpis.totalTransactions]);
+    return activeMonths.reduce((sum, key) => sum + (admitsData.map.get(key) || 0), 0);
+  }, [filteredRows, admitsData]);
 
-  const activeDateRangeLabel = useMemo(() => {
-    if (!filteredRows.length) return "No data";
-    if (!dateFilter.length) {
-      const minDate = filteredRows.reduce((min, row) => (row.date && (!min || row.date < min) ? row.date : min), null);
-      const maxDate = filteredRows.reduce((max, row) => (row.date && (!max || row.date > max) ? row.date : max), null);
-      return `All Dates (${formatDateLabel(minDate)} – ${formatDateLabel(maxDate)})`;
-    }
-    const selectedDates = filteredRows.map((row) => row.date).filter(Boolean).sort((a, b) => a - b);
-    const minDate = selectedDates[0];
-    const maxDate = selectedDates[selectedDates.length - 1];
-    return minDate.getTime() === maxDate.getTime() ? formatDateLabel(minDate) : `${formatDateLabel(minDate)} – ${formatDateLabel(maxDate)}`;
-  }, [filteredRows, dateFilter]);
+  const bankAdmits = useMemo(() => filteredRows.reduce((sum, r) => sum + (r.totalTickets || 0), 0), [filteredRows]);
+
+  const atpAvtSourceRows = paymentCategoryFilter === "upi" ? upiRows : cardRows;
+  const atpAvtSourceLabel = paymentCategoryFilter === "upi" ? "UPI" : "Bank offers";
+  const atpAvtKpis = useMemo(() => computeKpis(atpAvtSourceRows), [atpAvtSourceRows]);
+
+  const atp = useMemo(
+    () => (atpAvtKpis.totalTickets ? atpAvtKpis.ticketRevenue / atpAvtKpis.totalTickets : null),
+    [atpAvtKpis],
+  );
+
+  const avt = useMemo(
+    () => (atpAvtKpis.totalTransactions ? atpAvtKpis.grossRevenue / atpAvtKpis.totalTransactions : null),
+    [atpAvtKpis],
+  );
+
+  const universalATP = useMemo(() => {
+    const activeMonths = [...new Set(filteredRows.map((r) => r.monthKey).filter((k) => k !== "Unknown"))];
+    const validMonths = activeMonths.filter((key) => universalTicketRevenueData.map.has(key) && admitsData.map.has(key));
+    const ticketRev = validMonths.reduce((sum, key) => sum + universalTicketRevenueData.map.get(key), 0);
+    const admits = validMonths.reduce((sum, key) => sum + admitsData.map.get(key), 0);
+    return admits ? ticketRev / admits : null;
+  }, [filteredRows, universalTicketRevenueData, admitsData]);
+
+  const universalAVT = useMemo(() => {
+    const activeMonths = [...new Set(filteredRows.map((r) => r.monthKey).filter((k) => k !== "Unknown"))];
+    const validMonths = activeMonths.filter((key) => universalTotalRevenueData.map.has(key) && universalData.map.has(key));
+    const totalRev = validMonths.reduce((sum, key) => sum + universalTotalRevenueData.map.get(key), 0);
+    const universalTxns = validMonths.reduce((sum, key) => sum + universalData.map.get(key), 0);
+    return universalTxns ? totalRev / universalTxns : null;
+  }, [filteredRows, universalTotalRevenueData, universalData]);
+
+  const avtUpliftPercent = useMemo(
+    () => (universalAVT && avt !== null ? Math.abs(((universalAVT - avt) / universalAVT) * 100) : null),
+    [avt, universalAVT],
+  );
+
+  const groupARows = useMemo(
+    () => filterGroup(rows, groupABanks, groupADateStart, groupADateEnd),
+    [rows, groupABanks, groupADateStart, groupADateEnd],
+  );
+  const groupBRows = useMemo(
+    () => filterGroup(rows, groupBBanks, groupBDateStart, groupBDateEnd),
+    [rows, groupBBanks, groupBDateStart, groupBDateEnd],
+  );
+  const groupAKpis = useMemo(() => computeKpis(groupARows), [groupARows]);
+  const groupBKpis = useMemo(() => computeKpis(groupBRows), [groupBRows]);
+  const groupADiscountRate = safeRatio(groupAKpis.totalDiscount, groupAKpis.grossRevenue);
+  const groupBDiscountRate = safeRatio(groupBKpis.totalDiscount, groupBKpis.grossRevenue);
+  const groupRevenueDeltaPercent = computeDelta(groupBKpis.grossRevenue, groupAKpis.grossRevenue);
 
   const comparisonKpis = useMemo(() => {
     if (comparisonMode === "none") return null;
@@ -1316,33 +1670,47 @@ export default function App() {
 
     const currentRows = bankOfferFilteredRows.filter((row) => row.date && row.date >= currentStart && row.date <= currentEnd);
     const priorRows = bankOfferFilteredRows.filter((row) => row.date && row.date >= priorStart && row.date <= priorEnd);
+    const atpAvtCategory = paymentCategoryFilter === "upi" ? "UPI" : "Card";
+    const currentAtpAvtRows = currentRows.filter((row) => row.paymentCategory === atpAvtCategory);
+    const priorAtpAvtRows = priorRows.filter((row) => row.paymentCategory === atpAvtCategory);
 
     const current = computeKpis(currentRows);
     const prior = computeKpis(priorRows);
+    const currentAtpAvtKpis = computeKpis(currentAtpAvtRows);
+    const priorAtpAvtKpis = computeKpis(priorAtpAvtRows);
+    const atpFrom = (k) => (k.totalTickets ? k.ticketRevenue / k.totalTickets : null);
+    const avtFrom = (k) => (k.totalTransactions ? k.grossRevenue / k.totalTransactions : null);
+    const bankAdmitsFrom = (rowsList) => rowsList.reduce((sum, r) => sum + (r.totalTickets || 0), 0);
 
     return {
-      current: { ...current, recoveryRate: current.grossRevenue ? (current.netRevenue / current.grossRevenue) * 100 : 0 },
-      prior: { ...prior, recoveryRate: prior.grossRevenue ? (prior.netRevenue / prior.grossRevenue) * 100 : 0 },
+      current: {
+        ...current,
+        recoveryRate: current.grossRevenue ? (current.netRevenue / current.grossRevenue) * 100 : 0,
+        atp: atpFrom(currentAtpAvtKpis),
+        avt: avtFrom(currentAtpAvtKpis),
+        bankAdmits: bankAdmitsFrom(currentRows),
+      },
+      prior: {
+        ...prior,
+        recoveryRate: prior.grossRevenue ? (prior.netRevenue / prior.grossRevenue) * 100 : 0,
+        atp: atpFrom(priorAtpAvtKpis),
+        avt: avtFrom(priorAtpAvtKpis),
+        bankAdmits: bankAdmitsFrom(priorRows),
+      },
     };
-  }, [comparisonMode, latestDataDate, bankOfferFilteredRows]);
-  const extraKpis = useMemo(
-    () => ({
-      totalBanks: new Set(filteredRows.map((row) => row.bankName)).size,
-      totalOffers: new Set(filteredRows.map((row) => row.offerName)).size,
-    }),
-    [filteredRows],
-  );
+  }, [comparisonMode, latestDataDate, bankOfferFilteredRows, paymentCategoryFilter]);
   const offersByBank = useMemo(() => {
     const grouped = new Map();
 
-    filteredRows.forEach((row) => {
+    cardRows.forEach((row) => {
+      const canonicalName = OFFER_ALIAS_MAP[row.offerName] || normalizeOfferChannel(row.offerName);
       const bankEntry = grouped.get(row.bankName) || {
         bankName: row.bankName,
         offers: new Map(),
       };
 
-      const offerEntry = bankEntry.offers.get(row.offerName) || {
-        offerName: row.offerName,
+      const offerEntry = bankEntry.offers.get(canonicalName) || {
+        offerName: canonicalName,
         startDate: row.date,
         endDate: row.date,
         bankDiscount: 0,
@@ -1350,46 +1718,87 @@ export default function App() {
       };
 
       if (row.date) {
-        if (!offerEntry.startDate || row.date < offerEntry.startDate) {
-          offerEntry.startDate = row.date;
-        }
-        if (!offerEntry.endDate || row.date > offerEntry.endDate) {
-          offerEntry.endDate = row.date;
-        }
+        if (!offerEntry.startDate || row.date < offerEntry.startDate) offerEntry.startDate = row.date;
+        if (!offerEntry.endDate || row.date > offerEntry.endDate) offerEntry.endDate = row.date;
       }
 
       offerEntry.bankDiscount += row.bankContribution;
       offerEntry.pvrDiscount += row.inoxContribution;
 
-      bankEntry.offers.set(row.offerName, offerEntry);
+      bankEntry.offers.set(canonicalName, offerEntry);
       grouped.set(row.bankName, bankEntry);
     });
 
     return [...grouped.values()]
       .map((bankEntry) => {
         const offers = [...bankEntry.offers.values()]
-          .map((offer) => ({
-            ...offer,
-            startLabel: formatIsoDate(offer.startDate),
-            endLabel: formatIsoDate(offer.endDate),
-          }))
+          .map((offer) => ({ ...offer, startLabel: formatIsoDate(offer.startDate), endLabel: formatIsoDate(offer.endDate) }))
           .sort((left, right) => (left.startDate?.getTime() || 0) - (right.startDate?.getTime() || 0));
-
-        return {
-          bankName: bankEntry.bankName,
-          offerCount: offers.length,
-          offers,
-        };
+        return { bankName: bankEntry.bankName, offerCount: offers.length, offers };
       })
       .sort((left, right) => right.offerCount - left.offerCount || left.bankName.localeCompare(right.bankName));
-  }, [filteredRows]);
+  }, [cardRows]);
   const totalOfferCountByBank = useMemo(
     () => offersByBank.reduce((sum, bank) => sum + bank.offerCount, 0),
     [offersByBank],
   );
 
+  const upiOffersByPartner = useMemo(() => {
+    const grouped = new Map();
+
+    upiRows.forEach((row) => {
+      const canonicalName = OFFER_ALIAS_MAP[row.offerName] || normalizeOfferChannel(row.offerName);
+      const partnerEntry = grouped.get(row.bankName) || {
+        bankName: row.bankName,
+        offers: new Map(),
+      };
+
+      const offerEntry = partnerEntry.offers.get(canonicalName) || {
+        offerName: canonicalName,
+        startDate: row.date,
+        endDate: row.date,
+        bankDiscount: 0,
+        pvrDiscount: 0,
+      };
+
+      if (row.date) {
+        if (!offerEntry.startDate || row.date < offerEntry.startDate) offerEntry.startDate = row.date;
+        if (!offerEntry.endDate || row.date > offerEntry.endDate) offerEntry.endDate = row.date;
+      }
+
+      offerEntry.bankDiscount += row.bankContribution;
+      offerEntry.pvrDiscount += row.inoxContribution;
+
+      partnerEntry.offers.set(canonicalName, offerEntry);
+      grouped.set(row.bankName, partnerEntry);
+    });
+
+    return [...grouped.values()]
+      .map((partnerEntry) => {
+        const offers = [...partnerEntry.offers.values()]
+          .map((offer) => ({ ...offer, startLabel: formatIsoDate(offer.startDate), endLabel: formatIsoDate(offer.endDate) }))
+          .sort((left, right) => (left.startDate?.getTime() || 0) - (right.startDate?.getTime() || 0));
+        return { bankName: partnerEntry.bankName, offerCount: offers.length, offers };
+      })
+      .sort((left, right) => right.offerCount - left.offerCount || left.bankName.localeCompare(right.bankName));
+  }, [upiRows]);
+  const totalOfferCountByUpiPartner = useMemo(
+    () => upiOffersByPartner.reduce((sum, partner) => sum + partner.offerCount, 0),
+    [upiOffersByPartner],
+  );
+
+  const totalOfferCount = totalOfferCountByBank + totalOfferCountByUpiPartner;
+
   const bankRows = useMemo(() => aggregateBanks(filteredRows), [filteredRows]);
   const offerRows = useMemo(() => aggregateOffers(filteredRows), [filteredRows]);
+
+  const globalBankRows = useMemo(() => aggregateBanks(rows), [rows]);
+  const globalBankRankMap = useMemo(() => {
+    const sorted = [...globalBankRows].sort((a, b) => b.totalRevenue - a.totalRevenue);
+    const map = new Map();
+    sorted.forEach((b, index) => map.set(b.bankName, index + 1));
+    return map;
+  }, [globalBankRows]);
 
   const sortedBankRows = useMemo(() => {
     if (!bankSortKey) return bankRows;
@@ -1402,8 +1811,8 @@ export default function App() {
     const sorted = [...offerRows].sort((a, b) => a[offerSortKey] - b[offerSortKey]);
     return offerSortDir === "desc" ? sorted.reverse() : sorted;
   }, [offerRows, offerSortKey, offerSortDir]);
-  const monthlySeries = useMemo(() => aggregateMonthlySeries(rows, selectedChartBanks), [rows, selectedChartBanks]);
-  const seasonalData = useMemo(() => aggregateSeasonalByYear(rows, selectedChartBanks, seasonalMetric), [rows, selectedChartBanks, seasonalMetric]);
+  const monthlySeries = useMemo(() => aggregateMonthlySeries(rows, bankFilter), [rows, bankFilter]);
+  const seasonalData = useMemo(() => aggregateSeasonalByYear(rows, bankFilter, seasonalMetric), [rows, bankFilter, seasonalMetric]);
   const seasonalYears = useMemo(() => {
     const years = new Set();
     seasonalData.forEach((entry) => {
@@ -1413,7 +1822,7 @@ export default function App() {
     });
     return [...years].sort();
   }, [seasonalData]);
-  const yearlyData = useMemo(() => aggregateYearlyTotals(rows, selectedChartBanks), [rows, selectedChartBanks]);
+  const yearlyData = useMemo(() => aggregateYearlyTotals(rows, bankFilter), [rows, bankFilter]);
   const discountData = useMemo(() => {
     const grouped = new Map();
 
@@ -1462,7 +1871,7 @@ export default function App() {
     const amount = Number(value || 0);
     if (Math.abs(amount) >= 10000000) return `${(amount / 10000000).toFixed(1)} Cr`;
     if (Math.abs(amount) >= 100000) return `${(amount / 100000).toFixed(1)} L`;
-    return formatInCrore(amount);
+    return formatInLakh(amount);
   }
 
   function toggleSelectedBank(bankName) {
@@ -1471,6 +1880,10 @@ export default function App() {
 
   function toggleExpandedOfferBank(bankName) {
     setExpandedOfferBank((current) => (current === bankName ? null : bankName));
+  }
+
+  function toggleExpandedOfferUpiPartner(partnerName) {
+    setExpandedOfferUpiPartner((current) => (current === partnerName ? null : partnerName));
   }
 
   function applyQuickPeriod(rangeStart, rangeEnd) {
@@ -1486,9 +1899,9 @@ export default function App() {
   const selectedBankRow = useMemo(() => bankRows.find((bank) => bank.bankName === selectedBank) || null, [bankRows, selectedBank]);
   const selectedBankOffersEntry = useMemo(() => offersByBank.find((entry) => entry.bankName === selectedBank) || null, [offersByBank, selectedBank]);
   const selectedBankDiscountEntry = useMemo(() => discountData.find((entry) => entry.bankName === selectedBank) || null, [discountData, selectedBank]);
-  const anyModalOpen = Boolean(selectedBank || selectedOffer || showOffersByBank);
+  const anyModalOpen = Boolean(selectedBank || selectedOffer || showOffersByBank || showOffersByUpi);
 
-  function buildPairInsight(priorYear, currentYear, relevantRowsForYear) {
+  function buildPairInsight(priorYear, currentYear, relevantRowsForYear, admitsMap) {
     const currentRows = relevantRowsForYear(currentYear);
     const priorRows = relevantRowsForYear(priorYear);
 
@@ -1507,6 +1920,18 @@ export default function App() {
 
     const discountRateNote = computeDiscountRateNote(currentDiscountRate, priorDiscountRate);
     const volumeValueNote = computeVolumeValueNote(totalDeltaPercent, txnDeltaPercent);
+
+    const currentAdmits = sumAdmitsForMonths(currentRows.map((r) => r.monthKey), admitsMap);
+    const priorAdmits = sumAdmitsForMonths(priorRows.map((r) => r.monthKey), admitsMap);
+    const admitsDeltaPercent = priorAdmits ? ((currentAdmits - priorAdmits) / priorAdmits) * 100 : null;
+    const admitsNote = computeAdmitsNote(admitsDeltaPercent);
+
+    const currentATV = currentAdmits ? currentTotals.ticketRevenue / currentAdmits : null;
+    const priorATV = priorAdmits ? priorTotals.ticketRevenue / priorAdmits : null;
+    const atvDeltaPercent = priorATV ? ((currentATV - priorATV) / priorATV) * 100 : null;
+    const atvNote = computeATVNote(atvDeltaPercent);
+
+    const headline = generateHeadlineInsight({ revenueDeltaPercent: totalDeltaPercent, admitsDeltaPercent, atvDeltaPercent });
 
     const allBanksInPair = new Set([...priorRows.map((r) => r.bankName), ...currentRows.map((r) => r.bankName)]);
 
@@ -1541,6 +1966,15 @@ export default function App() {
       priorDiscountRate,
       discountRateNote,
       volumeValueNote,
+      currentAdmits,
+      priorAdmits,
+      admitsDeltaPercent,
+      admitsNote,
+      currentATV,
+      priorATV,
+      atvDeltaPercent,
+      atvNote,
+      headline,
       bankBreakdown,
       topBank,
     };
@@ -1556,7 +1990,7 @@ export default function App() {
           r.monthKey !== "Unknown" &&
           Number(r.monthKey.split("-")[0]) === month &&
           Number(r.monthKey.split("-")[1]) === year &&
-          (!selectedChartBanks.length || selectedChartBanks.includes(r.bankName)),
+          (!bankFilter.length || bankFilter.includes(r.bankName)),
       );
 
     const yearsWithData = seasonalYears
@@ -1568,15 +2002,48 @@ export default function App() {
     for (let i = 1; i < yearsWithData.length; i++) {
       const priorYear = yearsWithData[i - 1];
       const currentYear = yearsWithData[i];
-      pairs.push({ priorYear, currentYear, ...buildPairInsight(priorYear, currentYear, relevantRowsForMonth) });
+      pairs.push({ priorYear, currentYear, ...buildPairInsight(priorYear, currentYear, relevantRowsForMonth, admitsData.map) });
     }
     return pairs;
-  }, [selectedSeasonalPoint, seasonalYears, rows, selectedChartBanks]);
+  }, [selectedSeasonalPoint, seasonalYears, rows, bankFilter, admitsData]);
 
   const monthlyInsight = useMemo(() => {
     if (!selectedMonthlyPoint) return null;
-    return buildAdjacentMonthInsight(selectedMonthlyPoint.bankName, selectedMonthlyPoint.monthKey, rows);
+    return buildAdjacentMonthInsight(selectedMonthlyPoint.bankName, selectedMonthlyPoint.monthKey, rows, admitsData.map);
+  }, [selectedMonthlyPoint, rows, admitsData]);
+
+  const monthlyYoY = useMemo(() => {
+    if (!selectedMonthlyPoint) return null;
+    return buildBankYearOverYear(selectedMonthlyPoint.bankName, selectedMonthlyPoint.monthKey, rows);
   }, [selectedMonthlyPoint, rows]);
+
+  const bankRank = useMemo(() => {
+    if (!selectedMonthlyPoint) return null;
+    const sorted = [...bankRows].sort((a, b) => b.totalRevenue - a.totalRevenue);
+    const rank = sorted.findIndex((b) => b.bankName === selectedMonthlyPoint.bankName) + 1;
+    return rank > 0 ? rank : null;
+  }, [bankRows, selectedMonthlyPoint]);
+
+  const momAdjacentMonthInsight = useMemo(() => {
+    if (!selectedSeasonalPoint) return null;
+    const { month } = selectedSeasonalPoint;
+    const relevantRowsForMonth = (year) =>
+      rows.filter(
+        (r) =>
+          r.monthKey !== "Unknown" &&
+          Number(r.monthKey.split("-")[0]) === month &&
+          Number(r.monthKey.split("-")[1]) === year &&
+          (!bankFilter.length || bankFilter.includes(r.bankName)),
+      );
+    const yearsWithData = seasonalYears
+      .map(Number)
+      .filter((year) => relevantRowsForMonth(year).length > 0)
+      .sort((a, b) => a - b);
+    if (!yearsWithData.length) return null;
+    const currentYear = yearsWithData[yearsWithData.length - 1];
+    const monthKey = `${String(month).padStart(2, "0")}-${currentYear}`;
+    return buildAggregateAdjacentMonthInsight(bankFilter, monthKey, rows);
+  }, [selectedSeasonalPoint, seasonalYears, rows, bankFilter]);
 
   const yearInsight = useMemo(() => {
     if (!selectedYearPoint) return null;
@@ -1587,7 +2054,7 @@ export default function App() {
         (r) =>
           r.monthKey !== "Unknown" &&
           Number(r.monthKey.split("-")[1]) === y &&
-          (!selectedChartBanks.length || selectedChartBanks.includes(r.bankName)),
+          (!bankFilter.length || bankFilter.includes(r.bankName)),
       );
 
     const candidateYears = [...new Set(rows.filter((r) => r.monthKey !== "Unknown").map((r) => Number(r.monthKey.split("-")[1])))].sort(
@@ -1598,19 +2065,22 @@ export default function App() {
     const priorYear = idx > 0 ? yearsWithData[idx - 1] : null;
 
     if (!priorYear) {
-      const currentTotals = computeRowTotals(relevantRowsForYear(year));
+      const currentRows = relevantRowsForYear(year);
+      const currentTotals = computeRowTotals(currentRows);
       const currentDiscountRate = currentTotals.revenue ? (currentTotals.discount / currentTotals.revenue) * 100 : null;
-      return { year, hasPrior: false, currentTotals, currentDiscountRate };
+      const currentAdmits = sumAdmitsForMonths(currentRows.map((r) => r.monthKey), admitsData.map);
+      const currentATV = currentAdmits ? currentTotals.ticketRevenue / currentAdmits : null;
+      return { year, hasPrior: false, currentTotals, currentDiscountRate, currentAdmits, currentATV };
     }
 
-    return { year, priorYear, hasPrior: true, ...buildPairInsight(priorYear, year, relevantRowsForYear) };
-  }, [selectedYearPoint, rows, selectedChartBanks]);
+    return { year, priorYear, hasPrior: true, ...buildPairInsight(priorYear, year, relevantRowsForYear, admitsData.map) };
+  }, [selectedYearPoint, rows, bankFilter, admitsData]);
 
   function handleViewDetails() {
     if (trendMode === "monthly") {
-      if (selectedMonthlyPoint || !monthlySeries.length || !selectedChartBanks.length) return;
+      if (selectedMonthlyPoint || !monthlySeries.length || !bankFilter.length) return;
       const latestRow = monthlySeries[monthlySeries.length - 1];
-      const bankName = selectedChartBanks.find((bank) => typeof latestRow[bank] === "number") || selectedChartBanks[0];
+      const bankName = bankFilter.find((bank) => typeof latestRow[bank] === "number") || bankFilter[0];
       setSelectedMonthlyPoint({ bankName, monthKey: latestRow.monthKey, monthLabel: formatMonthKeyLabel(latestRow.monthKey) });
     } else if (trendMode === "mom") {
       if (selectedSeasonalPoint || !seasonalData.length) return;
@@ -1665,30 +2135,92 @@ export default function App() {
             </button>
           </div>
 
-          <div className="text-right">
-            {penetrationData.hasAnyData ? (
-              <>
-                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-textMuted">
-                  Bank Offer Contribution <span className="ml-1 font-extrabold text-textMain">{activeDateRangeLabel}</span>
-                </p>
-                {penetrationData.missingMonths.length ? (
-                  <p className="text-xs font-semibold text-amber-700">Universal data missing for some months</p>
-                ) : penetrationData.percent !== null ? (
-                  <>
-                    <p className="text-lg font-extrabold leading-tight text-textMain">{penetrationData.percent.toFixed(1)}%</p>
-                    <p className="text-xs text-textMuted">
-                      {formatCountInCrore(kpis.totalTransactions)} partnered / {formatCountInCrore(penetrationData.universalTotal)} PVR INOX Total Transaction
-                    </p>
-                  </>
-                ) : (
-                  <p className="text-xs text-textMuted">No transactions in the selected period.</p>
-                )}
-              </>
-            ) : (
-              <p className="text-xs text-textMuted">Add "Universal Transactions" column to see penetration %.</p>
-            )}
+          <div className="ml-auto flex items-center gap-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".xlsx,.xls,.csv"
+              className="hidden"
+              onChange={(event) => {
+                const [file] = [...(event.target.files || [])];
+                if (file) handleFileChange(file);
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setDragActive(true);
+              }}
+              onDragLeave={() => setDragActive(false)}
+              onDrop={(event) => {
+                event.preventDefault();
+                setDragActive(false);
+                const [file] = [...(event.dataTransfer.files || [])];
+                if (file) handleFileChange(file);
+              }}
+              title={fileName || "Upload Excel Performance File"}
+              className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
+                dragActive ? "border-accentBlue bg-blue-50 text-accentBlue" : "border-borderSoft bg-white text-textMain hover:bg-slate-50"
+              }`}
+            >
+              📎 <span className="max-w-[140px] truncate">{fileName || "Upload File"}</span>
+            </button>
+            {fileName ? (
+              <button
+                type="button"
+                onClick={handleRemoveFile}
+                className="rounded-full border border-rose-200 bg-rose-50 px-2 py-1 text-[10px] font-bold text-rose-600 hover:bg-rose-100"
+              >
+                ✕ Remove
+              </button>
+            ) : null}
+
+            <input
+              ref={upiFileInputRef}
+              type="file"
+              accept=".xlsx,.xls,.csv"
+              className="hidden"
+              onChange={(event) => {
+                const [file] = [...(event.target.files || [])];
+                if (file) handleUpiFileChange(file);
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => upiFileInputRef.current?.click()}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setUpiDragActive(true);
+              }}
+              onDragLeave={() => setUpiDragActive(false)}
+              onDrop={(event) => {
+                event.preventDefault();
+                setUpiDragActive(false);
+                const [file] = [...(event.dataTransfer.files || [])];
+                if (file) handleUpiFileChange(file);
+              }}
+              title={upiFileName || "Upload UPI Partner File"}
+              className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
+                upiDragActive ? "border-accentBlue bg-blue-50 text-accentBlue" : "border-borderSoft bg-white text-textMain hover:bg-slate-50"
+              }`}
+            >
+              📎 <span className="max-w-[140px] truncate">{upiFileName || "Upload UPI Data"}</span>
+            </button>
+            {upiFileName ? (
+              <button
+                type="button"
+                onClick={handleRemoveUpiFile}
+                className="rounded-full border border-rose-200 bg-rose-50 px-2 py-1 text-[10px] font-bold text-rose-600 hover:bg-rose-100"
+              >
+                ✕ Remove
+              </button>
+            ) : null}
           </div>
         </div>
+        {error ? <p className="text-right text-[10px] font-semibold text-rose-600">{error}</p> : null}
+        {upiError ? <p className="text-right text-[10px] font-semibold text-rose-600">{upiError}</p> : null}
 
         {missingColumns.length || universalData.inconsistent.size > 0 ? (
           <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2 text-xs font-semibold text-amber-700">
@@ -1707,66 +2239,103 @@ export default function App() {
               : "sticky top-0 z-50 -mx-4 flex justify-center border-b border-borderSoft bg-white/95 px-4 py-2 shadow-sm backdrop-blur sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8"
           }
         >
-          <div className="flex flex-wrap items-center justify-center gap-3">
-            <DateMultiSelectDropdown
-              options={dates}
-              selected={dateFilter}
-              onToggle={(date) => {
-                setDateFilter((current) => (current.includes(date) ? current.filter((item) => item !== date) : [...current, date]));
-              }}
-              onClear={() => {
-                console.log("[Clear audit] Date filter cleared, new value:", []);
-                setDateFilter([]);
-              }}
-              onApplyRange={applyDateRange}
-            />
-            <MultiSelectDropdown
-              options={banks}
-              selected={bankFilter}
-              onToggle={(bank) => {
-                setBankFilter((current) => (current.includes(bank) ? current.filter((item) => item !== bank) : [...current, bank]));
-              }}
-              onClear={() => {
-                console.log("[Clear audit] Bank filter cleared, new value:", []);
-                setBankFilter([]);
-              }}
-              label="bank"
-            />
-            <MultiSelectDropdown
-              options={offers}
-              selected={offerFilter}
-              onToggle={(offer) => {
-                setOfferFilter((current) => (current.includes(offer) ? current.filter((item) => item !== offer) : [...current, offer]));
-              }}
-              onClear={() => {
-                console.log("[Clear audit] Offer filter cleared, new value:", []);
-                setOfferFilter([]);
-              }}
-              label="offer"
-            />
+          <div className="flex w-full items-center gap-3">
+            <div className="flex flex-shrink-0 rounded-full border border-borderSoft bg-white p-1 shadow-sm">
+              {[
+                { key: "card", label: "Bank" },
+                { key: "upi", label: "UPI" },
+                { key: "all", label: "Both" },
+              ].map((opt) => (
+                <button
+                  key={opt.key}
+                  type="button"
+                  onClick={() => setPaymentCategoryFilter(opt.key)}
+                  className={`rounded-full px-3 py-1.5 text-xs font-bold uppercase tracking-wide transition ${
+                    paymentCategoryFilter === opt.key ? "bg-accentBlue text-white" : "text-textMuted hover:bg-slate-50"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <div className="flex flex-1 flex-wrap items-center justify-center gap-3">
+              <DateMultiSelectDropdown
+                options={dates}
+                selected={dateFilter}
+                onToggle={(date) => {
+                  setDateFilter((current) => (current.includes(date) ? current.filter((item) => item !== date) : [...current, date]));
+                }}
+                onClear={() => {
+                  console.log("[Clear audit] Date filter cleared, new value:", []);
+                  setDateFilter([]);
+                }}
+                onApplyRange={applyDateRange}
+              />
+              <MultiSelectDropdown
+                options={banks}
+                selected={bankFilter}
+                onToggle={(bank) => {
+                  setBankFilter((current) => (current.includes(bank) ? current.filter((item) => item !== bank) : [...current, bank]));
+                }}
+                onClear={() => {
+                  console.log("[Clear audit] Bank filter cleared, new value:", []);
+                  setBankFilter([]);
+                }}
+                label="bank"
+              />
+              <MultiSelectDropdown
+                options={offers}
+                selected={offerFilter}
+                onToggle={(offer) => {
+                  setOfferFilter((current) => (current.includes(offer) ? current.filter((item) => item !== offer) : [...current, offer]));
+                }}
+                onClear={() => {
+                  console.log("[Clear audit] Offer filter cleared, new value:", []);
+                  setOfferFilter([]);
+                }}
+                label="offer"
+              />
+            </div>
           </div>
         </div>
 
-        {/* Row 3 (was Row 2) — Total Banks / Total Offers / Info Section / Upload, 4 equal compact boxes */}
+        {/* Row 3 (was Row 2) — Total Banks / Total Offers / Info Section, 4 equal compact boxes */}
         <div className="grid grid-cols-4 gap-3">
           <div className="flex h-[90px] flex-col justify-center rounded-2xl border border-white/60 bg-white/90 p-3 shadow-soft">
-            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500">Total Banks</p>
-            <p className="mt-1 text-2xl font-extrabold text-textMain">{formatInteger(extraKpis.totalBanks)}</p>
-            <p className="text-xs text-textMuted">Unique bank partners</p>
+            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500">Total Banks / UPI</p>
+            <p className="mt-1 text-2xl font-extrabold text-textMain">
+              {formatInteger(activeCardBanks.length)} / {formatInteger(activeUpiPartners.length)}
+            </p>
           </div>
           <div className="flex h-[90px] flex-col justify-center rounded-2xl border border-white/60 bg-white/90 p-3 shadow-soft">
             <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500">Total Offers</p>
-            <p className="mt-1 text-2xl font-extrabold text-textMain">{formatInteger(extraKpis.totalOffers)}</p>
-            <p className="text-xs text-textMuted">Active offers</p>
+            <p className="mt-1 text-2xl font-extrabold text-textMain">{formatInteger(totalOfferCount)}</p>
+            <p className="text-xs text-textMuted">
+              {formatInteger(totalOfferCountByBank)} Card / {formatInteger(totalOfferCountByUpiPartner)} UPI
+            </p>
           </div>
+          <button
+            type="button"
+            onClick={() => setShowOffersByUpi(true)}
+            className="flex h-[90px] items-center justify-between gap-2 rounded-2xl border border-white/60 bg-white/90 p-3 text-left shadow-soft"
+          >
+            <div className="min-w-0">
+              <p className="mt-1 truncate text-sm font-bold text-textMain">UPI Partners</p>
+              <p className="text-xs text-textMuted">
+                {formatInteger(totalOfferCountByUpiPartner)} offers across {formatInteger(upiOffersByPartner.length)} partners
+              </p>
+            </div>
+            <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl border border-borderSoft bg-slate-50 text-sm font-bold text-textMuted">
+              →
+            </span>
+          </button>
           <button
             type="button"
             onClick={() => setShowOffersByBank(true)}
             className="flex h-[90px] items-center justify-between gap-2 rounded-2xl border border-white/60 bg-white/90 p-3 text-left shadow-soft"
           >
             <div className="min-w-0">
-              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-textMuted">Info Section</p>
-              <p className="mt-1 truncate text-sm font-bold text-textMain">Total Offers by Each Bank</p>
+              <p className="mt-1 truncate text-sm font-bold text-textMain">Bank Partners</p>
               <p className="text-xs text-textMuted">
                 {formatInteger(totalOfferCountByBank)} offers across {formatInteger(offersByBank.length)} banks
               </p>
@@ -1775,15 +2344,6 @@ export default function App() {
               →
             </span>
           </button>
-          <UploadPanel
-            onFileChange={handleFileChange}
-            dragActive={dragActive}
-            setDragActive={setDragActive}
-            fileName={fileName}
-            error={error}
-            onRemoveFile={handleRemoveFile}
-            inputRef={fileInputRef}
-          />
         </div>
 
         {/* Row 4 — Key Metrics (kept at full size, most generous space) */}
@@ -1811,48 +2371,66 @@ export default function App() {
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
             <StatCard
               title="Total Transactions"
-              value={formatCountInCrore(kpis.totalTransactions)}
+              value={formatCountInLakh(kpis.totalTransactions)}
+              subtitle={`${formatCountInLakh(cardRows.reduce((s, r) => s + r.discountedTransactions, 0))} Card / ${formatCountInLakh(
+                upiRows.reduce((s, r) => s + r.discountedTransactions, 0),
+              )} UPI`}
               color={KPI_COLORS[0]}
               icon="TX"
               delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.totalTransactions, comparisonKpis.prior.totalTransactions), label: COMPARISON_LABELS[comparisonMode] } : undefined}
             />
             <StatCard
-              title="Gross Revenue"
-              value={formatInCrore(kpis.grossRevenue)}
+              title="Revenue"
+              value={formatInLakh(kpis.grossRevenue)}
+              subtitle={`${formatInLakh(cardRows.reduce((s, r) => s + r.transactionTotal, 0))} Card / ${formatInLakh(
+                upiRows.reduce((s, r) => s + r.transactionTotal, 0),
+              )} UPI`}
               color={KPI_COLORS[0]}
               icon="GR"
               delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.grossRevenue, comparisonKpis.prior.grossRevenue), label: COMPARISON_LABELS[comparisonMode] } : undefined}
             />
             <StatCard
-              title="Net Revenue"
-              value={formatInCrore(kpis.netRevenue)}
+              title="ATP"
+              value={atp !== null ? formatRupee(atp) : "—"}
+              subtitle={
+                universalATP !== null
+                  ? `${atpAvtSourceLabel}: ${formatRupee(atp)} · Universal: ${formatRupee(universalATP)}`
+                  : "Add 'Universal Ticket Revenue' column to compare vs. universal"
+              }
               color={KPI_COLORS[0]}
-              icon="NR"
-              delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.netRevenue, comparisonKpis.prior.netRevenue), label: COMPARISON_LABELS[comparisonMode] } : undefined}
+              icon="TP"
+              delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.atp, comparisonKpis.prior.atp), label: COMPARISON_LABELS[comparisonMode] } : undefined}
             />
             <StatCard
-              title="Total Discount Given"
-              value={formatInCrore(kpis.totalDiscount)}
+              title="AVT"
+              value={avt !== null ? formatRupee(avt) : "—"}
+              subtitle={
+                universalAVT !== null
+                  ? `${atpAvtSourceLabel}: ${formatRupee(avt)} · Universal: ${formatRupee(universalAVT)}`
+                  : "Add 'Universal Total Revenue' column to compare vs. universal"
+              }
               color={KPI_COLORS[0]}
-              icon="DG"
-              delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.totalDiscount, comparisonKpis.prior.totalDiscount), label: COMPARISON_LABELS[comparisonMode] } : undefined}
+              icon="AT"
+              delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.avt, comparisonKpis.prior.avt), label: COMPARISON_LABELS[comparisonMode] } : undefined}
               extra={
-                <>
-                  <p className="text-xs font-semibold text-slate-500">
-                    Bank: {formatInCrore(overallSplit.totalBank)} ({overallSplit.bankPercent.toFixed(0)}%)
-                  </p>
-                  <p className="text-xs font-semibold text-slate-500">
-                    PVR: {formatInCrore(overallSplit.totalPvr)} ({overallSplit.pvrPercent.toFixed(0)}%)
-                  </p>
-                </>
+                avtUpliftPercent !== null ? (
+                  <p className="text-xs font-bold text-emerald-600">▲ {avtUpliftPercent.toFixed(0)}% uplift towards universal</p>
+                ) : null
               }
             />
             <StatCard
-              title="Total Discount Rate"
-              value={`${kpis.recoveryRate.toFixed(1)}%`}
+              title="Admits"
+              value={`${formatCountInLakh(activeAdmitsTotal)} / ${formatCountInLakh(bankAdmits)}`}
+              subtitle={
+                <>
+                  Universal / Bank
+                  <br />
+                  Bank is {activeAdmitsTotal ? `${((bankAdmits / activeAdmitsTotal) * 100).toFixed(1)}%` : "—"} of universal
+                </>
+              }
               color={KPI_COLORS[0]}
-              icon="RR"
-              delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.recoveryRate, comparisonKpis.prior.recoveryRate), label: COMPARISON_LABELS[comparisonMode] } : undefined}
+              icon="AD"
+              delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.bankAdmits, comparisonKpis.prior.bankAdmits), label: COMPARISON_LABELS[comparisonMode] } : undefined}
             />
           </div>
         </section>
@@ -1861,8 +2439,8 @@ export default function App() {
           <div className="flex h-[488px] flex-col overflow-hidden rounded-[2rem] border border-white/60 bg-white/90 p-5 shadow-soft">
             <div className="flex items-center justify-between gap-3">
               <div>
-                <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Bank Scorecard</p>
-                <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Bank Performance Overview</h2>
+                <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Bank / UPI Partner Scorecard</p>
+                <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Bank / UPI Partner Performance Overview</h2>
               </div>
               <div className="flex items-center gap-3">
                 {bankSortKey ? (
@@ -1883,7 +2461,7 @@ export default function App() {
                   <thead className="sticky top-0 bg-slate-50/95 backdrop-blur">
                     <tr>
                       <th className="w-[18%] px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">
-                        Bank
+                        Bank/UPI
                         <span className="mt-0.5 block text-[10px] font-semibold normal-case tracking-normal text-textMuted/70">
                           ({bankRows.length} banks)
                         </span>
@@ -1901,7 +2479,7 @@ export default function App() {
                       >
                         Total Txns {bankSortKey === "totalTransactions" ? (bankSortDir === "desc" ? "▼" : "▲") : ""}
                         <span className="mt-0.5 block text-[10px] font-semibold normal-case tracking-normal text-textMuted/70">
-                          ({formatCountInCrore(kpis.totalTransactions)})
+                          ({formatCountInLakh(kpis.totalTransactions)})
                         </span>
                       </th>
                       <th
@@ -1917,7 +2495,7 @@ export default function App() {
                       >
                         Total Revenue {bankSortKey === "totalRevenue" ? (bankSortDir === "desc" ? "▼" : "▲") : ""}
                         <span className="mt-0.5 block text-[10px] font-semibold normal-case tracking-normal text-textMuted/70">
-                          ({formatInCrore(kpis.grossRevenue)})
+                          ({formatInLakh(kpis.grossRevenue)})
                         </span>
                       </th>
                       <th
@@ -1933,7 +2511,7 @@ export default function App() {
                       >
                         Total Discount {bankSortKey === "discountCost" ? (bankSortDir === "desc" ? "▼" : "▲") : ""}
                         <span className="mt-0.5 block text-[10px] font-semibold normal-case tracking-normal text-textMuted/70">
-                          ({formatInCrore(kpis.totalDiscount)})
+                          ({formatInLakh(kpis.totalDiscount)})
                         </span>
                       </th>
                       <th className="w-[32%] px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">Discount Split (Bank / PVR)</th>
@@ -1946,19 +2524,19 @@ export default function App() {
                         <tr key={bank.bankName} className={`${index % 2 === 0 ? "bg-white" : "bg-slate-50/60"} cursor-pointer transition hover:bg-blue-50/70`} onClick={() => toggleSelectedBank(bank.bankName)}>
                           <td className="px-4 py-3 font-bold text-textMain">{bank.bankName}</td>
                           <td className="px-4 py-3 font-semibold text-textMain">
-                            {formatCountInCrore(bank.totalTransactions)}
+                            {formatCountInLakh(bank.totalTransactions)}
                             <span className="ml-1 text-xs font-bold text-textMuted">
                               ({kpis.totalTransactions ? ((bank.totalTransactions / kpis.totalTransactions) * 100).toFixed(1) : "0.0"}%)
                             </span>
                           </td>
                           <td className="px-4 py-3 font-semibold text-textMain">
-                            <span className="whitespace-nowrap">{formatInCrore(bank.totalRevenue)}</span>
+                            <span className="whitespace-nowrap">{formatInLakh(bank.totalRevenue)}</span>
                             <span className="mt-0.5 block text-xs font-bold text-textMuted">
                               ({kpis.grossRevenue ? ((bank.totalRevenue / kpis.grossRevenue) * 100).toFixed(1) : "0.0"}%)
                             </span>
                           </td>
                           <td className="px-4 py-3 font-semibold text-textMain">
-                            <span className="whitespace-nowrap">{formatInCrore(bank.discountCost)}</span>
+                            <span className="whitespace-nowrap">{formatInLakh(bank.discountCost)}</span>
                             <span className="mt-0.5 block text-xs font-bold text-textMuted">
                               ({kpis.totalDiscount ? ((bank.discountCost / kpis.totalDiscount) * 100).toFixed(1) : "0.0"}%)
                             </span>
@@ -1966,8 +2544,8 @@ export default function App() {
                           <td className="px-4 py-3 text-xs font-semibold text-textMain">
                             {split ? (
                               <div className="flex flex-col gap-0.5">
-                                <span className="text-accentBlue">Bank: {formatInCrore(split.bankDiscount)} ({split.bankPercent.toFixed(0)}%)</span>
-                                <span className="text-accentGreen">PVR: {formatInCrore(split.pvrDiscount)} ({split.pvrPercent.toFixed(0)}%)</span>
+                                <span className="text-accentBlue">Bank: {formatInLakh(split.bankDiscount)} ({split.bankPercent.toFixed(0)}%)</span>
+                                <span className="text-accentGreen">PVR: {formatInLakh(split.pvrDiscount)} ({split.pvrPercent.toFixed(0)}%)</span>
                               </div>
                             ) : "—"}
                           </td>
@@ -1986,12 +2564,12 @@ export default function App() {
 
           <div className="flex h-[488px] flex-col justify-center overflow-hidden rounded-[2rem] border border-white/60 bg-white/90 p-5 shadow-soft">
             <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Discount Split</p>
-            <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Overall Bank vs PVR Contribution</h2>
+            <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Overall Bank / UPI vs PVR Contribution</h2>
             <div className="mt-6 flex flex-col gap-6">
               <div>
                 <div className="flex items-center justify-between text-sm font-bold text-textMain">
-                  <span className="text-accentBlue">Bank: {formatInCrore(overallSplit.totalBank)} ({overallSplit.bankPercent.toFixed(0)}%)</span>
-                  <span className="text-accentGreen">PVR: {formatInCrore(overallSplit.totalPvr)} ({overallSplit.pvrPercent.toFixed(0)}%)</span>
+                  <span className="text-accentBlue">Bank: {formatInLakh(overallSplit.totalBank)} ({overallSplit.bankPercent.toFixed(0)}%)</span>
+                  <span className="text-accentGreen">PVR: {formatInLakh(overallSplit.totalPvr)} ({overallSplit.pvrPercent.toFixed(0)}%)</span>
                 </div>
                 <div className="mt-3 flex h-8 w-full overflow-hidden rounded-full bg-slate-100">
                   <div className="h-full bg-accentBlue transition-all" style={{ width: `${overallSplit.bankPercent}%` }} />
@@ -2000,13 +2578,13 @@ export default function App() {
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="rounded-2xl bg-blue-50 p-4">
-                  <p className="text-xs font-bold uppercase tracking-[0.18em] text-accentBlue">Bank Contribution</p>
-                  <p className="mt-2 text-2xl font-bold text-textMain">{formatInCrore(overallSplit.totalBank)}</p>
+                  <p className="text-xs font-bold uppercase tracking-[0.18em] text-accentBlue">Bank/UPI Contribution</p>
+                  <p className="mt-2 text-2xl font-bold text-textMain">{formatInLakh(overallSplit.totalBank)}</p>
                   <p className="mt-1 text-sm font-semibold text-textMuted">{overallSplit.bankPercent.toFixed(1)}% of total discount</p>
                 </div>
                 <div className="rounded-2xl bg-emerald-50 p-4">
                   <p className="text-xs font-bold uppercase tracking-[0.18em] text-accentGreen">PVR Contribution</p>
-                  <p className="mt-2 text-2xl font-bold text-textMain">{formatInCrore(overallSplit.totalPvr)}</p>
+                  <p className="mt-2 text-2xl font-bold text-textMain">{formatInLakh(overallSplit.totalPvr)}</p>
                   <p className="mt-1 text-sm font-semibold text-textMuted">{overallSplit.pvrPercent.toFixed(1)}% of total discount</p>
                 </div>
               </div>
@@ -2020,7 +2598,7 @@ export default function App() {
             <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Revenue by Channel</h2>
             <div className="relative mt-4 h-[340px] overflow-hidden rounded-3xl bg-appBg p-3">
               <span className="absolute right-3 top-3 z-10 rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-textMuted">
-                Total: {formatInCrore(channelData.reduce((sum, c) => sum + c.value, 0))}
+                Total: {formatInLakh(channelData.reduce((sum, c) => sum + c.value, 0))}
               </span>
               {channelData.length ? (
                 <ResponsiveContainer width="100%" height="100%">
@@ -2032,13 +2610,13 @@ export default function App() {
                       cx="50%"
                       cy="50%"
                       outerRadius={110}
-                      label={({ name, value, percent }) => `${name}: ${formatInCrore(value)} (${(percent * 100).toFixed(0)}%)`}
+                      label={({ name, value, percent }) => `${name}: ${formatInLakh(value)} (${(percent * 100).toFixed(0)}%)`}
                     >
                       {channelData.map((entry) => (
                         <Cell key={entry.name} fill={CHANNEL_COLORS[entry.name] || CHANNEL_FALLBACK_COLOR} />
                       ))}
                     </Pie>
-                    <Tooltip formatter={(value) => formatInCrore(value)} contentStyle={{ borderRadius: "18px", borderColor: "#e2e8f0" }} />
+                    <Tooltip formatter={(value) => formatInLakh(value)} contentStyle={{ borderRadius: "18px", borderColor: "#e2e8f0" }} />
                     <Legend />
                   </PieChart>
                 </ResponsiveContainer>
@@ -2055,7 +2633,7 @@ export default function App() {
             <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Ticket vs F&B Revenue</h2>
             <div className="relative mt-4 h-[340px] overflow-hidden rounded-3xl bg-appBg p-3">
               <span className="absolute right-3 top-3 z-10 rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-textMuted">
-                Total: {formatInCrore(ticketVsFnbData.reduce((sum, c) => sum + c.value, 0))}
+                Total: {formatInLakh(ticketVsFnbData.reduce((sum, c) => sum + c.value, 0))}
               </span>
               {filteredRows.length ? (
                 <ResponsiveContainer width="100%" height="100%">
@@ -2067,13 +2645,13 @@ export default function App() {
                       cx="50%"
                       cy="50%"
                       outerRadius={110}
-                      label={({ name, value, percent }) => `${name}: ${formatInCrore(value)} (${(percent * 100).toFixed(0)}%)`}
+                      label={({ name, value, percent }) => `${name}: ${formatInLakh(value)} (${(percent * 100).toFixed(0)}%)`}
                     >
                       {ticketVsFnbData.map((entry) => (
                         <Cell key={entry.name} fill={TICKET_FNB_COLORS[entry.name]} />
                       ))}
                     </Pie>
-                    <Tooltip formatter={(value) => formatInCrore(value)} contentStyle={{ borderRadius: "18px", borderColor: "#e2e8f0" }} />
+                    <Tooltip formatter={(value) => formatInLakh(value)} contentStyle={{ borderRadius: "18px", borderColor: "#e2e8f0" }} />
                     <Legend />
                   </PieChart>
                 </ResponsiveContainer>
@@ -2090,7 +2668,7 @@ export default function App() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Offer Directory</p>
-              <h2 className="mt-1 font-display text-2xl font-bold text-textMain">All offers grouped by bank</h2>
+              <h2 className="mt-1 font-display text-2xl font-bold text-textMain">All offers grouped by bank / UPI Partners</h2>
             </div>
             {offerSortKey ? (
               <button
@@ -2132,7 +2710,7 @@ export default function App() {
                     >
                       Transactions {offerSortKey === "transactions" ? (offerSortDir === "desc" ? "▼" : "▲") : ""}
                       <span className="mt-0.5 block text-[10px] font-semibold normal-case tracking-normal text-textMuted/70">
-                        ({formatCountInCrore(kpis.totalTransactions)})
+                        ({formatCountInLakh(kpis.totalTransactions)})
                       </span>
                     </th>
                     <th
@@ -2148,7 +2726,7 @@ export default function App() {
                     >
                       Revenue {offerSortKey === "revenue" ? (offerSortDir === "desc" ? "▼" : "▲") : ""}
                       <span className="mt-0.5 block text-[10px] font-semibold normal-case tracking-normal text-textMuted/70">
-                        ({formatInCrore(kpis.grossRevenue)})
+                        ({formatInLakh(kpis.grossRevenue)})
                       </span>
                     </th>
                     <th
@@ -2164,7 +2742,7 @@ export default function App() {
                     >
                       Discount {offerSortKey === "discount" ? (offerSortDir === "desc" ? "▼" : "▲") : ""}
                       <span className="mt-0.5 block text-[10px] font-semibold normal-case tracking-normal text-textMuted/70">
-                        ({formatInCrore(kpis.totalDiscount)})
+                        ({formatInLakh(kpis.totalDiscount)})
                       </span>
                     </th>
                     <th className="px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">Discount %</th>
@@ -2175,15 +2753,15 @@ export default function App() {
                     <tr key={`${offer.offerName}-${offer.bankName}`} className={`${index % 2 === 0 ? "bg-white" : "bg-slate-50/60"} cursor-pointer transition hover:bg-blue-50/70`} onClick={() => setSelectedOffer(offer)}>
                       <td className="px-4 py-3 font-semibold text-textMain">{offer.bankName}</td>
                       <td className="px-4 py-3 font-bold text-textMain">{offer.offerName}</td>
-                      <td className="px-4 py-3 font-semibold text-textMain">{formatCountInCrore(offer.transactions)}</td>
+                      <td className="px-4 py-3 font-semibold text-textMain">{formatCountInLakh(offer.transactions)}</td>
                       <td className="px-4 py-3 font-semibold text-textMain">
-                        {formatInCrore(offer.revenue)}
+                        {formatInLakh(offer.revenue)}
                         <span className="ml-1 text-xs font-bold text-textMuted">
                           ({kpis.grossRevenue ? ((offer.revenue / kpis.grossRevenue) * 100).toFixed(2) : "0.00"}%)
                         </span>
                       </td>
                       <td className="px-4 py-3 font-semibold text-textMain">
-                        {formatInCrore(offer.discount)}
+                        {formatInLakh(offer.discount)}
                         <span className="ml-1 text-xs font-bold text-textMuted">
                           ({kpis.totalDiscount ? ((offer.discount / kpis.totalDiscount) * 100).toFixed(2) : "0.00"}%)
                         </span>
@@ -2204,10 +2782,10 @@ export default function App() {
         <section className="rounded-[2rem] border border-white/60 bg-white/90 p-5 shadow-soft">
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
-              <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Month-wise Bank Performance</p>
+              <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Month-wise Bank/UPI Performance</p>
               <h2 className="mt-1 font-display text-2xl font-bold text-textMain">
                 {trendMode === "monthly"
-                  ? "Monthly revenue trend by selected banks"
+                  ? "Monthly revenue trend by selected banks / UPI Partners"
                   : trendMode === "mom"
                     ? "Seasonal comparison across years for selected banks"
                     : "Yearly revenue totals for selected banks"}
@@ -2251,29 +2829,19 @@ export default function App() {
                   ))}
                 </div>
               ) : null}
-              <span className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Independent Filter</span>
-              <MultiSelectDropdown
-                options={banks}
-                selected={selectedChartBanks}
-                onToggle={(bank) => {
-                  setSelectedChartBanks((current) => (current.includes(bank) ? current.filter((item) => item !== bank) : [...current, bank]));
-                }}
-                onClear={() => setSelectedChartBanks([])}
-                label="bank"
-              />
             </div>
           </div>
           <div className="mt-4 h-[320px] overflow-hidden rounded-3xl border border-borderSoft bg-white">
             {trendMode === "monthly" ? (
-              monthlySeries.length && selectedChartBanks.length ? (
+              monthlySeries.length && bankFilter.length ? (
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={monthlySeries} margin={{ top: 10, right: 20, left: 0, bottom: 10 }}>
                     <CartesianGrid stroke="#e2e8f0" strokeDasharray="4 4" />
                     <XAxis dataKey="monthKey" stroke="#718096" />
-                    <YAxis stroke="#718096" tickFormatter={formatInCrore} />
+                    <YAxis stroke="#718096" tickFormatter={formatInLakh} />
                     <Tooltip allowEscapeViewBox={{ x: false, y: true }} content={<MonthlyTrendTooltip />} />
                     <Legend />
-                    {selectedChartBanks.map((bank) => (
+                    {bankFilter.map((bank) => (
                       <Line
                         key={bank}
                         type="monotone"
@@ -2301,23 +2869,23 @@ export default function App() {
                 </div>
               )
             ) : trendMode === "mom" ? (
-              seasonalData.length && selectedChartBanks.length ? (
+              seasonalData.length && bankFilter.length ? (
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={seasonalData} margin={{ top: 10, right: 20, left: 10, bottom: 10 }}>
                     <CartesianGrid stroke="#e2e8f0" strokeDasharray="4 4" />
                     <XAxis dataKey="monthLabel" stroke="#718096" />
                     <YAxis
                       stroke="#718096"
-                      tickFormatter={seasonalMetric === "transactions" ? formatCountInCrore : formatInCrore}
+                      tickFormatter={seasonalMetric === "transactions" ? formatCountInLakh : formatInLakh}
                       label={{
-                        value: seasonalMetric === "revenue" ? "Revenue (₹ Cr)" : seasonalMetric === "transactions" ? "Transactions" : "Discount (₹ Cr)",
+                        value: seasonalMetric === "revenue" ? "Revenue (₹ L)" : seasonalMetric === "transactions" ? "Transactions" : "Discount (₹ L)",
                         angle: -90,
                         position: "insideLeft",
                       }}
                     />
                     <Tooltip
                       allowEscapeViewBox={{ x: false, y: true }}
-                      content={<MonthlyTrendTooltip formatValue={seasonalMetric === "transactions" ? formatCountInCrore : formatInCrore} />}
+                      content={<MonthlyTrendTooltip formatValue={seasonalMetric === "transactions" ? formatCountInLakh : formatInLakh} />}
                     />
                     <Legend />
                     {seasonalYears.map((year, index) => (
@@ -2343,13 +2911,13 @@ export default function App() {
                   Select at least one bank to view the month-on-month seasonality chart.
                 </div>
               )
-            ) : yearlyData.length && selectedChartBanks.length ? (
+            ) : yearlyData.length && bankFilter.length ? (
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={yearlyData} margin={{ top: 24, right: 20, left: 0, bottom: 10 }}>
                   <CartesianGrid stroke="#e2e8f0" strokeDasharray="4 4" />
                   <XAxis dataKey="year" stroke="#718096" />
-                  <YAxis stroke="#718096" tickFormatter={formatInCrore} />
-                  <Tooltip formatter={(value) => formatInCrore(value)} contentStyle={{ borderRadius: "18px", borderColor: "#e2e8f0" }} />
+                  <YAxis stroke="#718096" tickFormatter={formatInLakh} />
+                  <Tooltip formatter={(value) => formatInLakh(value)} contentStyle={{ borderRadius: "18px", borderColor: "#e2e8f0" }} />
                   <Legend />
                   <Bar
                     dataKey="revenue"
@@ -2360,7 +2928,7 @@ export default function App() {
                     activeBar={{ fill: "#1d4ed8" }}
                     onClick={(data) => setSelectedYearPoint({ year: Number(data.year) })}
                   >
-                    <LabelList dataKey="revenue" position="top" formatter={(value) => formatInCrore(value)} style={{ fontSize: 12, fontWeight: 700, fill: "#1a202c" }} />
+                    <LabelList dataKey="revenue" position="top" formatter={(value) => formatInLakh(value)} style={{ fontSize: 12, fontWeight: 700, fill: "#1a202c" }} />
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
@@ -2387,6 +2955,35 @@ export default function App() {
                 </button>
               </div>
 
+              <div className="mb-3 space-y-1 rounded-xl bg-blue-50 p-3">
+                <p className="text-sm font-semibold text-blue-900">
+                  Last Year vs Current Year:{" "}
+                  {inferencePairs.length ? (
+                    (() => {
+                      const latest = inferencePairs[inferencePairs.length - 1];
+                      return latest.totalDeltaPercent === null ? (
+                        "—"
+                      ) : (
+                        <>
+                          {formatInLakh(latest.priorTotal)} → {formatInLakh(latest.currentTotal)} (
+                          {latest.totalDeltaPercent >= 0 ? "▲" : "▼"} {Math.abs(latest.totalDeltaPercent).toFixed(1)}%)
+                        </>
+                      );
+                    })()
+                  ) : (
+                    "—"
+                  )}
+                </p>
+                <p className="text-sm font-semibold text-blue-900">
+                  Current Month vs Last Month:{" "}
+                  {momAdjacentMonthInsight
+                    ? `${formatInLakh(momAdjacentMonthInsight.priorRevenue)} → ${formatInLakh(momAdjacentMonthInsight.currentRevenue)} (${
+                        momAdjacentMonthInsight.deltaPercent >= 0 ? "▲" : "▼"
+                      } ${Math.abs(momAdjacentMonthInsight.deltaPercent).toFixed(1)}%)`
+                    : "—"}
+                </p>
+              </div>
+
               {inferencePairs.length === 0 ? (
                 <p className="text-sm text-textMuted">Not enough historical data for this month to compare.</p>
               ) : (
@@ -2395,7 +2992,12 @@ export default function App() {
                     <p className="mb-2 text-sm font-bold text-textMain">
                       {pair.priorYear} → {pair.currentYear}
                     </p>
-                    <p className="mb-1 text-xs text-textMuted">
+                    {pair.headline ? (
+                      <div className="mb-2 rounded-xl bg-blue-50 p-3">
+                        <p className="text-sm font-semibold text-blue-900">{pair.headline}</p>
+                      </div>
+                    ) : null}
+                    <p className="mb-3 text-xs text-textMuted">
                       Shows the size of the year-over-year change, not a reason for it — the data has no field that explains why.
                     </p>
                     <p className="mb-3 text-sm text-textMain">
@@ -2403,17 +3005,19 @@ export default function App() {
                       {pair.totalDeltaPercent === null
                         ? "change unavailable"
                         : `${pair.totalDeltaPercent > 0 ? "up" : "down"} ${Math.abs(pair.totalDeltaPercent).toFixed(1)}%`}{" "}
-                      ({formatInCrore(pair.priorTotal)} → {formatInCrore(pair.currentTotal)})
+                      ({formatInLakh(pair.priorTotal)} → {formatInLakh(pair.currentTotal)})
                     </p>
 
                     <p className="mb-2 text-xs font-bold uppercase tracking-[0.15em] text-textMuted">Who drove it</p>
                     <div className="mb-3 space-y-1.5">
                       {pair.bankBreakdown.slice(0, 5).map((b) => (
                         <div key={b.bankName} className="flex items-center justify-between text-sm">
-                          <span className="text-textMain">{b.bankName}</span>
+                          <span className="text-textMain">
+                            Rank #{globalBankRankMap.get(b.bankName) || "—"} - {b.bankName}
+                          </span>
                           <span className={b.deltaAbs >= 0 ? "font-semibold text-emerald-600" : "font-semibold text-rose-500"}>
                             {b.deltaAbs >= 0 ? "+" : ""}
-                            {formatInCrore(b.deltaAbs)} ({b.contributionPercent === null ? "—" : `${b.contributionPercent.toFixed(0)}%`} of change)
+                            {formatInLakh(b.deltaAbs)} ({b.contributionPercent === null ? "—" : `${b.contributionPercent.toFixed(0)}%`} of change)
                           </span>
                         </div>
                       ))}
@@ -2435,6 +3039,20 @@ export default function App() {
                           {pair.totalDeltaPercent === null ? "—" : `${pair.totalDeltaPercent > 0 ? "+" : ""}${pair.totalDeltaPercent.toFixed(1)}%`}
                         </p>
                         <p className="mt-1 text-xs text-textMuted">{pair.volumeValueNote}</p>
+                      </div>
+                      <div className="rounded-xl bg-white p-3">
+                        <p className="text-xs font-bold uppercase tracking-[0.15em] text-textMuted">Admits</p>
+                        <p className="text-sm text-textMain">
+                          {formatCountInLakh(pair.priorAdmits)} → {formatCountInLakh(pair.currentAdmits)}
+                        </p>
+                        <p className="mt-1 text-xs text-textMuted">{pair.admitsNote}</p>
+                      </div>
+                      <div className="rounded-xl bg-white p-3">
+                        <p className="text-xs font-bold uppercase tracking-[0.15em] text-textMuted">ATV</p>
+                        <p className="text-sm text-textMain">
+                          {pair.priorATV === null ? "—" : formatRupee(pair.priorATV)} → {pair.currentATV === null ? "—" : formatRupee(pair.currentATV)}
+                        </p>
+                        <p className="mt-1 text-xs text-textMuted">{pair.atvNote}</p>
                       </div>
                     </div>
 
@@ -2458,16 +3076,45 @@ export default function App() {
                   ✕ Close
                 </button>
               </div>
-              <p className="mb-3 text-xs text-textMuted">Shows the size of the change, not a reason for it — the data has no field that explains why.</p>
+
+              <div className="mb-3 space-y-1 rounded-xl bg-blue-50 p-3">
+                <p className="text-sm font-semibold text-blue-900">
+                  Last Year vs Current Year:{" "}
+                  {monthlyYoY
+                    ? `${formatInLakh(monthlyYoY.priorRevenue)} → ${formatInLakh(monthlyYoY.currentRevenue)} (${
+                        monthlyYoY.deltaPercent >= 0 ? "▲" : "▼"
+                      } ${Math.abs(monthlyYoY.deltaPercent).toFixed(1)}%)`
+                    : "—"}
+                </p>
+                <p className="text-sm font-semibold text-blue-900">
+                  Current Month vs Last Month:{" "}
+                  {monthlyInsight.hasPrior && monthlyInsight.totalDeltaPercent !== null
+                    ? `${formatInLakh(monthlyInsight.priorTotals.revenue)} → ${formatInLakh(monthlyInsight.currentTotals.revenue)} (${
+                        monthlyInsight.totalDeltaPercent >= 0 ? "▲" : "▼"
+                      } ${Math.abs(monthlyInsight.totalDeltaPercent).toFixed(1)}%)`
+                    : "—"}
+                </p>
+                <p className="text-sm font-semibold text-blue-900">
+                  Rank: {bankRank ? `#${bankRank} of ${bankRows.length} banks by revenue` : "—"}
+                </p>
+              </div>
 
               {monthlyInsight.hasPrior ? (
                 <>
+                  {monthlyInsight.headline ? (
+                    <div className="mb-2 rounded-xl bg-blue-50 p-3">
+                      <p className="text-sm font-semibold text-blue-900">{monthlyInsight.headline}</p>
+                    </div>
+                  ) : null}
+                  <p className="mb-3 text-xs text-textMuted">
+                    Shows the size of the change, not a reason for it — the data has no field that explains why.
+                  </p>
                   <p className="mb-3 text-sm text-textMain">
                     Overall{" "}
                     {monthlyInsight.totalDeltaPercent === null
                       ? "change unavailable"
                       : `${monthlyInsight.totalDeltaPercent > 0 ? "up" : "down"} ${Math.abs(monthlyInsight.totalDeltaPercent).toFixed(1)}%`}{" "}
-                    ({formatInCrore(monthlyInsight.priorTotals.revenue)} → {formatInCrore(monthlyInsight.currentTotals.revenue)})
+                    ({formatInLakh(monthlyInsight.priorTotals.revenue)} → {formatInLakh(monthlyInsight.currentTotals.revenue)})
                   </p>
                   <div className="grid grid-cols-2 gap-3">
                     <div className="rounded-xl bg-white p-3">
@@ -2492,15 +3139,32 @@ export default function App() {
                       </p>
                       <p className="mt-1 text-xs text-textMuted">{monthlyInsight.volumeValueNote}</p>
                     </div>
+                    <div className="rounded-xl bg-white p-3">
+                      <p className="text-xs font-bold uppercase tracking-[0.15em] text-textMuted">Admits</p>
+                      <p className="text-sm text-textMain">
+                        {formatCountInLakh(monthlyInsight.priorAdmits)} → {formatCountInLakh(monthlyInsight.currentAdmits)}
+                      </p>
+                      <p className="mt-1 text-xs text-textMuted">{monthlyInsight.admitsNote}</p>
+                    </div>
+                    <div className="rounded-xl bg-white p-3">
+                      <p className="text-xs font-bold uppercase tracking-[0.15em] text-textMuted">ATV</p>
+                      <p className="text-sm text-textMain">
+                        {monthlyInsight.priorATV === null ? "—" : formatRupee(monthlyInsight.priorATV)} →{" "}
+                        {monthlyInsight.currentATV === null ? "—" : formatRupee(monthlyInsight.currentATV)}
+                      </p>
+                      <p className="mt-1 text-xs text-textMuted">{monthlyInsight.atvNote}</p>
+                    </div>
                   </div>
                 </>
               ) : (
                 <>
                   <p className="mb-1 text-xs font-semibold text-amber-700">No prior month to compare — showing this month's figures.</p>
                   <p className="text-sm text-textMain">
-                    Revenue: {formatInCrore(monthlyInsight.currentTotals.revenue)} · Transactions:{" "}
-                    {formatCountInCrore(monthlyInsight.currentTotals.transactions)} · Discount: {formatInCrore(monthlyInsight.currentTotals.discount)} ·
-                    Discount rate: {monthlyInsight.currentDiscountRate === null ? "—" : `${monthlyInsight.currentDiscountRate.toFixed(1)}%`}
+                    Revenue: {formatInLakh(monthlyInsight.currentTotals.revenue)} · Transactions:{" "}
+                    {formatCountInLakh(monthlyInsight.currentTotals.transactions)} · Discount: {formatInLakh(monthlyInsight.currentTotals.discount)} ·
+                    Discount rate: {monthlyInsight.currentDiscountRate === null ? "—" : `${monthlyInsight.currentDiscountRate.toFixed(1)}%`} · Admits:{" "}
+                    {formatCountInLakh(monthlyInsight.currentAdmits)} · ATV:{" "}
+                    {monthlyInsight.currentATV === null ? "—" : formatRupee(monthlyInsight.currentATV)}
                   </p>
                 </>
               )}
@@ -2515,26 +3179,47 @@ export default function App() {
                   ✕ Close
                 </button>
               </div>
-              <p className="mb-3 text-xs text-textMuted">Shows the size of the change, not a reason for it — the data has no field that explains why.</p>
+
+              <div className="mb-3 space-y-1 rounded-xl bg-blue-50 p-3">
+                <p className="text-sm font-semibold text-blue-900">
+                  Last Year vs Current Year:{" "}
+                  {yearInsight.hasPrior && yearInsight.totalDeltaPercent !== null
+                    ? `${formatInLakh(yearInsight.priorTotal)} → ${formatInLakh(yearInsight.currentTotal)} (${
+                        yearInsight.totalDeltaPercent >= 0 ? "▲" : "▼"
+                      } ${Math.abs(yearInsight.totalDeltaPercent).toFixed(1)}%)`
+                    : "—"}
+                </p>
+                <p className="text-sm font-semibold text-blue-900">Current Month vs Last Month: — (year view has no month granularity)</p>
+              </div>
 
               {yearInsight.hasPrior ? (
                 <>
+                  {yearInsight.headline ? (
+                    <div className="mb-2 rounded-xl bg-blue-50 p-3">
+                      <p className="text-sm font-semibold text-blue-900">{yearInsight.headline}</p>
+                    </div>
+                  ) : null}
+                  <p className="mb-3 text-xs text-textMuted">
+                    Shows the size of the change, not a reason for it — the data has no field that explains why.
+                  </p>
                   <p className="mb-3 text-sm text-textMain">
                     Overall{" "}
                     {yearInsight.totalDeltaPercent === null
                       ? "change unavailable"
                       : `${yearInsight.totalDeltaPercent > 0 ? "up" : "down"} ${Math.abs(yearInsight.totalDeltaPercent).toFixed(1)}%`}{" "}
-                    ({formatInCrore(yearInsight.priorTotal)} → {formatInCrore(yearInsight.currentTotal)})
+                    ({formatInLakh(yearInsight.priorTotal)} → {formatInLakh(yearInsight.currentTotal)})
                   </p>
 
                   <p className="mb-2 text-xs font-bold uppercase tracking-[0.15em] text-textMuted">Who drove it</p>
                   <div className="mb-3 space-y-1.5">
                     {yearInsight.bankBreakdown.slice(0, 5).map((b) => (
                       <div key={b.bankName} className="flex items-center justify-between text-sm">
-                        <span className="text-textMain">{b.bankName}</span>
+                        <span className="text-textMain">
+                          Rank #{globalBankRankMap.get(b.bankName) || "—"} - {b.bankName}
+                        </span>
                         <span className={b.deltaAbs >= 0 ? "font-semibold text-emerald-600" : "font-semibold text-rose-500"}>
                           {b.deltaAbs >= 0 ? "+" : ""}
-                          {formatInCrore(b.deltaAbs)} ({b.contributionPercent === null ? "—" : `${b.contributionPercent.toFixed(0)}%`} of change)
+                          {formatInLakh(b.deltaAbs)} ({b.contributionPercent === null ? "—" : `${b.contributionPercent.toFixed(0)}%`} of change)
                         </span>
                       </div>
                     ))}
@@ -2561,20 +3246,165 @@ export default function App() {
                       </p>
                       <p className="mt-1 text-xs text-textMuted">{yearInsight.volumeValueNote}</p>
                     </div>
+                    <div className="rounded-xl bg-white p-3">
+                      <p className="text-xs font-bold uppercase tracking-[0.15em] text-textMuted">Admits</p>
+                      <p className="text-sm text-textMain">
+                        {formatCountInLakh(yearInsight.priorAdmits)} → {formatCountInLakh(yearInsight.currentAdmits)}
+                      </p>
+                      <p className="mt-1 text-xs text-textMuted">{yearInsight.admitsNote}</p>
+                    </div>
+                    <div className="rounded-xl bg-white p-3">
+                      <p className="text-xs font-bold uppercase tracking-[0.15em] text-textMuted">ATV</p>
+                      <p className="text-sm text-textMain">
+                        {yearInsight.priorATV === null ? "—" : formatRupee(yearInsight.priorATV)} →{" "}
+                        {yearInsight.currentATV === null ? "—" : formatRupee(yearInsight.currentATV)}
+                      </p>
+                      <p className="mt-1 text-xs text-textMuted">{yearInsight.atvNote}</p>
+                    </div>
                   </div>
                 </>
               ) : (
                 <>
                   <p className="mb-1 text-xs font-semibold text-amber-700">No prior year to compare — showing this year's figures.</p>
                   <p className="text-sm text-textMain">
-                    Revenue: {formatInCrore(yearInsight.currentTotals.revenue)} · Transactions: {formatCountInCrore(yearInsight.currentTotals.transactions)}{" "}
-                    · Discount: {formatInCrore(yearInsight.currentTotals.discount)} · Discount rate:{" "}
-                    {yearInsight.currentDiscountRate === null ? "—" : `${yearInsight.currentDiscountRate.toFixed(1)}%`}
+                    Revenue: {formatInLakh(yearInsight.currentTotals.revenue)} · Transactions: {formatCountInLakh(yearInsight.currentTotals.transactions)}{" "}
+                    · Discount: {formatInLakh(yearInsight.currentTotals.discount)} · Discount rate:{" "}
+                    {yearInsight.currentDiscountRate === null ? "—" : `${yearInsight.currentDiscountRate.toFixed(1)}%`} · Admits:{" "}
+                    {formatCountInLakh(yearInsight.currentAdmits)} · ATV:{" "}
+                    {yearInsight.currentATV === null ? "—" : formatRupee(yearInsight.currentATV)}
                   </p>
                 </>
               )}
             </div>
           ) : null}
+        </section>
+
+        <section className="rounded-[2rem] border border-white/60 bg-white/90 p-5 shadow-soft">
+          <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Custom Comparison</p>
+          <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Bank/UPI Group A vs Bank/UPI Group B</h2>
+          <p className="mt-1 text-sm text-textMuted">
+            Independent of the main Date/Bank/Offer filters above — each group has its own banks and date range.
+          </p>
+
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <div className="rounded-2xl border border-borderSoft bg-slate-50 p-4">
+              <p className="text-xs font-bold uppercase tracking-[0.18em] text-textMuted">Group A</p>
+              <div className="mt-2">
+                <MultiSelectDropdown
+                  options={banks}
+                  selected={groupABanks}
+                  onToggle={(bank) =>
+                    setGroupABanks((current) => (current.includes(bank) ? current.filter((item) => item !== bank) : [...current, bank]))
+                  }
+                  onClear={() => setGroupABanks([])}
+                  label="bank"
+                />
+              </div>
+              <div className="mt-3 flex items-center gap-2">
+                <input
+                  type="month"
+                  value={groupADateStart}
+                  onChange={(event) => setGroupADateStart(event.target.value)}
+                  className="w-full rounded-xl border border-borderSoft px-3 py-2 text-sm text-textMain"
+                />
+                <span className="text-xs font-bold text-textMuted">to</span>
+                <input
+                  type="month"
+                  value={groupADateEnd}
+                  onChange={(event) => setGroupADateEnd(event.target.value)}
+                  className="w-full rounded-xl border border-borderSoft px-3 py-2 text-sm text-textMain"
+                />
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-borderSoft bg-slate-50 p-4">
+              <p className="text-xs font-bold uppercase tracking-[0.18em] text-textMuted">Group B</p>
+              <div className="mt-2">
+                <MultiSelectDropdown
+                  options={banks}
+                  selected={groupBBanks}
+                  onToggle={(bank) =>
+                    setGroupBBanks((current) => (current.includes(bank) ? current.filter((item) => item !== bank) : [...current, bank]))
+                  }
+                  onClear={() => setGroupBBanks([])}
+                  label="bank"
+                />
+              </div>
+              <div className="mt-3 flex items-center gap-2">
+                <input
+                  type="month"
+                  value={groupBDateStart}
+                  onChange={(event) => setGroupBDateStart(event.target.value)}
+                  className="w-full rounded-xl border border-borderSoft px-3 py-2 text-sm text-textMain"
+                />
+                <span className="text-xs font-bold text-textMuted">to</span>
+                <input
+                  type="month"
+                  value={groupBDateEnd}
+                  onChange={(event) => setGroupBDateEnd(event.target.value)}
+                  className="w-full rounded-xl border border-borderSoft px-3 py-2 text-sm text-textMain"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-5">
+            {!groupADateStart || !groupADateEnd || !groupBDateStart || !groupBDateEnd ? (
+              <p className="text-sm text-textMuted">Select a date range for both groups to compare.</p>
+            ) : !groupARows.length || !groupBRows.length ? (
+              <p className="text-sm text-textMuted">No data for this selection.</p>
+            ) : (
+              <>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-xs font-bold uppercase tracking-[0.15em] text-textMuted">
+                        <th className="py-2 pr-4">Metric</th>
+                        <th className="py-2 pr-4">Group A</th>
+                        <th className="py-2 pr-4">Group B</th>
+                        <th className="py-2">Delta (B vs A)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-borderSoft">
+                      <tr>
+                        <td className="py-2 pr-4 font-semibold text-textMain">Revenue</td>
+                        <td className="py-2 pr-4 text-textMain">{formatInLakh(groupAKpis.grossRevenue)}</td>
+                        <td className="py-2 pr-4 text-textMain">{formatInLakh(groupBKpis.grossRevenue)}</td>
+                        <td className="py-2">{renderDeltaBadge(computeDelta(groupBKpis.grossRevenue, groupAKpis.grossRevenue))}</td>
+                      </tr>
+                      <tr>
+                        <td className="py-2 pr-4 font-semibold text-textMain">Transactions</td>
+                        <td className="py-2 pr-4 text-textMain">{formatCountInLakh(groupAKpis.totalTransactions)}</td>
+                        <td className="py-2 pr-4 text-textMain">{formatCountInLakh(groupBKpis.totalTransactions)}</td>
+                        <td className="py-2">{renderDeltaBadge(computeDelta(groupBKpis.totalTransactions, groupAKpis.totalTransactions))}</td>
+                      </tr>
+                      <tr>
+                        <td className="py-2 pr-4 font-semibold text-textMain">Discount</td>
+                        <td className="py-2 pr-4 text-textMain">{formatInLakh(groupAKpis.totalDiscount)}</td>
+                        <td className="py-2 pr-4 text-textMain">{formatInLakh(groupBKpis.totalDiscount)}</td>
+                        <td className="py-2">{renderDeltaBadge(computeDelta(groupBKpis.totalDiscount, groupAKpis.totalDiscount))}</td>
+                      </tr>
+                      <tr>
+                        <td className="py-2 pr-4 font-semibold text-textMain">Discount Rate</td>
+                        <td className="py-2 pr-4 text-textMain">{groupADiscountRate.toFixed(1)}%</td>
+                        <td className="py-2 pr-4 text-textMain">{groupBDiscountRate.toFixed(1)}%</td>
+                        <td className="py-2">{renderDeltaBadge(computeDelta(groupBDiscountRate, groupADiscountRate))}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <p className="mt-4 text-sm text-textMain">
+                  {groupBBanks.join("/") || "Group B"} ({groupBDateStart} to {groupBDateEnd}) generated {formatInLakh(groupBKpis.grossRevenue)} vs{" "}
+                  {groupABanks.join("/") || "Group A"} ({groupADateStart} to {groupADateEnd})'s {formatInLakh(groupAKpis.grossRevenue)} —{" "}
+                  {groupRevenueDeltaPercent === null
+                    ? "no comparable prior data"
+                    : `a ${Math.abs(groupRevenueDeltaPercent).toFixed(1)}% ${groupRevenueDeltaPercent >= 0 ? "increase" : "decrease"}`}
+                  .
+                </p>
+              </>
+            )}
+          </div>
         </section>
       </div>
 
@@ -2592,6 +3422,17 @@ export default function App() {
           expandedOfferBank={expandedOfferBank}
           onToggleBank={toggleExpandedOfferBank}
           onClose={() => setShowOffersByBank(false)}
+        />
+      ) : null}
+      {showOffersByUpi ? (
+        <OffersByBankModal
+          offersByBank={upiOffersByPartner}
+          totalOfferCountByBank={totalOfferCountByUpiPartner}
+          expandedOfferBank={expandedOfferUpiPartner}
+          onToggleBank={toggleExpandedOfferUpiPartner}
+          onClose={() => setShowOffersByUpi(false)}
+          heading="Total Offers by Each UPI Partner"
+          entityNoun="partners"
         />
       ) : null}
     </div>
