@@ -884,6 +884,22 @@ function safeRatio(numerator, denominator) {
   return (numerator / denominator) * 100;
 }
 
+function computeUpliftOrContribution(bankValue, universalValue) {
+  if (!universalValue || bankValue === null) return null;
+  if (bankValue > universalValue) {
+    return { type: "uplift", percent: ((bankValue - universalValue) / universalValue) * 100 };
+  }
+  return { type: "contribution", percent: (bankValue / universalValue) * 100 };
+}
+
+function UpliftOrContributionLine({ comparison }) {
+  if (!comparison) return null;
+  if (comparison.type === "uplift") {
+    return <p className="text-xs font-bold text-emerald-600">▲ {comparison.percent.toFixed(0)}% uplift vs universal</p>;
+  }
+  return <p className="text-xs text-textMuted">Bank is {comparison.percent.toFixed(1)}% of universal</p>;
+}
+
 function StatCard({ title, value, subtitle, color, icon, delta, extra }) {
   return (
     <div className={`min-w-0 rounded-3xl border p-3 shadow-soft ${color.accent}`}>
@@ -1623,12 +1639,14 @@ export default function App() {
 
   const bankAdmits = useMemo(() => filteredRows.reduce((sum, r) => sum + (r.totalTickets || 0), 0), [filteredRows]);
 
-  const atpAvtSourceRows = paymentCategoryFilter === "upi" ? upiRows : cardRows;
-  const atpAvtSourceLabel = paymentCategoryFilter === "upi" ? "UPI" : "Bank offers";
+  const atpAvtSourceRows =
+    paymentCategoryFilter === "upi" ? upiRows : paymentCategoryFilter === "card" ? cardRows : filteredRows;
+  const atpAvtSourceLabel =
+    paymentCategoryFilter === "upi" ? "UPI" : paymentCategoryFilter === "card" ? "Bank offers" : "Both";
   const atpAvtKpis = useMemo(() => computeKpis(atpAvtSourceRows), [atpAvtSourceRows]);
 
   const atp = useMemo(
-    () => (atpAvtKpis.totalTickets ? atpAvtKpis.ticketRevenue / atpAvtKpis.totalTickets : null),
+    () => (atpAvtKpis.totalTickets ? atpAvtKpis.grossRevenue / atpAvtKpis.totalTickets : null),
     [atpAvtKpis],
   );
 
@@ -1653,9 +1671,11 @@ export default function App() {
     return universalTxns ? totalRev / universalTxns : null;
   }, [filteredRows, universalTotalRevenueData, universalData]);
 
-  const avtUpliftPercent = useMemo(
-    () => (universalAVT && avt !== null ? Math.abs(((universalAVT - avt) / universalAVT) * 100) : null),
-    [avt, universalAVT],
+  const avtComparison = useMemo(() => computeUpliftOrContribution(avt, universalAVT), [avt, universalAVT]);
+  const atpComparison = useMemo(() => computeUpliftOrContribution(atp, universalATP), [atp, universalATP]);
+  const admitsComparison = useMemo(
+    () => computeUpliftOrContribution(bankAdmits, activeAdmitsTotal),
+    [bankAdmits, activeAdmitsTotal],
   );
 
   const groupARows = useMemo(
@@ -1680,15 +1700,15 @@ export default function App() {
 
     const currentRows = bankOfferFilteredRows.filter((row) => row.date && row.date >= currentStart && row.date <= currentEnd);
     const priorRows = bankOfferFilteredRows.filter((row) => row.date && row.date >= priorStart && row.date <= priorEnd);
-    const atpAvtCategory = paymentCategoryFilter === "upi" ? "UPI" : "Card";
-    const currentAtpAvtRows = currentRows.filter((row) => row.paymentCategory === atpAvtCategory);
-    const priorAtpAvtRows = priorRows.filter((row) => row.paymentCategory === atpAvtCategory);
+    const atpAvtCategory = paymentCategoryFilter === "upi" ? "UPI" : paymentCategoryFilter === "card" ? "Card" : null;
+    const currentAtpAvtRows = atpAvtCategory ? currentRows.filter((row) => row.paymentCategory === atpAvtCategory) : currentRows;
+    const priorAtpAvtRows = atpAvtCategory ? priorRows.filter((row) => row.paymentCategory === atpAvtCategory) : priorRows;
 
     const current = computeKpis(currentRows);
     const prior = computeKpis(priorRows);
     const currentAtpAvtKpis = computeKpis(currentAtpAvtRows);
     const priorAtpAvtKpis = computeKpis(priorAtpAvtRows);
-    const atpFrom = (k) => (k.totalTickets ? k.ticketRevenue / k.totalTickets : null);
+    const atpFrom = (k) => (k.totalTickets ? k.grossRevenue / k.totalTickets : null);
     const avtFrom = (k) => (k.totalTransactions ? k.grossRevenue / k.totalTransactions : null);
     const bankAdmitsFrom = (rowsList) => rowsList.reduce((sum, r) => sum + (r.totalTickets || 0), 0);
 
@@ -2410,9 +2430,13 @@ export default function App() {
             <StatCard
               title="Total Transactions"
               value={formatCountInLakh(kpis.totalTransactions)}
-              subtitle={`${formatCountInLakh(cardRows.reduce((s, r) => s + r.discountedTransactions, 0))} Card / ${formatCountInLakh(
-                upiRows.reduce((s, r) => s + r.discountedTransactions, 0),
-              )} UPI`}
+              subtitle={
+                <>
+                  {formatCountInLakh(cardRows.reduce((s, r) => s + r.discountedTransactions, 0))} Card
+                  <br />
+                  {formatCountInLakh(upiRows.reduce((s, r) => s + r.discountedTransactions, 0))} UPI
+                </>
+              }
               color={KPI_COLORS[0]}
               icon="TX"
               delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.totalTransactions, comparisonKpis.prior.totalTransactions), label: COMPARISON_LABELS[comparisonMode] } : undefined}
@@ -2420,9 +2444,13 @@ export default function App() {
             <StatCard
               title="Revenue"
               value={formatInLakh(kpis.grossRevenue)}
-              subtitle={`${formatInLakh(cardRows.reduce((s, r) => s + r.transactionTotal, 0))} Card / ${formatInLakh(
-                upiRows.reduce((s, r) => s + r.transactionTotal, 0),
-              )} UPI`}
+              subtitle={
+                <>
+                  {formatInLakh(cardRows.reduce((s, r) => s + r.transactionTotal, 0))} Card
+                  <br />
+                  {formatInLakh(upiRows.reduce((s, r) => s + r.transactionTotal, 0))} UPI
+                </>
+              }
               color={KPI_COLORS[0]}
               icon="GR"
               delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.grossRevenue, comparisonKpis.prior.grossRevenue), label: COMPARISON_LABELS[comparisonMode] } : undefined}
@@ -2431,30 +2459,39 @@ export default function App() {
               title="ATP"
               value={atp !== null ? formatRupee(atp) : "—"}
               subtitle={
-                universalATP !== null
-                  ? `${atpAvtSourceLabel}: ${formatRupee(atp)} · Universal: ${formatRupee(universalATP)}`
-                  : "Add 'Universal Ticket Revenue' column to compare vs. universal"
+                universalATP !== null ? (
+                  <>
+                    {atpAvtSourceLabel}: {formatRupee(atp)}
+                    <br />
+                    Universal: {formatRupee(universalATP)}
+                  </>
+                ) : (
+                  "Add 'Universal Ticket Revenue' column to compare vs. universal"
+                )
               }
               color={KPI_COLORS[0]}
               icon="TP"
               delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.atp, comparisonKpis.prior.atp), label: COMPARISON_LABELS[comparisonMode] } : undefined}
+              extra={<UpliftOrContributionLine comparison={atpComparison} />}
             />
             <StatCard
               title="AVT"
               value={avt !== null ? formatRupee(avt) : "—"}
               subtitle={
-                universalAVT !== null
-                  ? `${atpAvtSourceLabel}: ${formatRupee(avt)} · Universal: ${formatRupee(universalAVT)}`
-                  : "Add 'Universal Total Revenue' column to compare vs. universal"
+                universalAVT !== null ? (
+                  <>
+                    {atpAvtSourceLabel}: {formatRupee(avt)}
+                    <br />
+                    Universal: {formatRupee(universalAVT)}
+                  </>
+                ) : (
+                  "Add 'Universal Total Revenue' column to compare vs. universal"
+                )
               }
               color={KPI_COLORS[0]}
               icon="AT"
               delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.avt, comparisonKpis.prior.avt), label: COMPARISON_LABELS[comparisonMode] } : undefined}
-              extra={
-                avtUpliftPercent !== null ? (
-                  <p className="text-xs font-bold text-emerald-600">▲ {avtUpliftPercent.toFixed(0)}% uplift towards universal</p>
-                ) : null
-              }
+              extra={<UpliftOrContributionLine comparison={avtComparison} />}
             />
             <StatCard
               title="Admits"
@@ -2463,7 +2500,7 @@ export default function App() {
                 <>
                   Universal / Bank
                   <br />
-                  Bank is {activeAdmitsTotal ? `${((bankAdmits / activeAdmitsTotal) * 100).toFixed(1)}%` : "—"} of universal
+                  <UpliftOrContributionLine comparison={admitsComparison} />
                 </>
               }
               color={KPI_COLORS[0]}
