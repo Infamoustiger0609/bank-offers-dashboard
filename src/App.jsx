@@ -57,7 +57,7 @@ const UPI_OPTIONAL_COLUMNS = new Set(["bankContribution", "discountedTransaction
 
 const CHANNEL_COLORS = {
   Online: "#2563eb",
-  "Offline - Box Office": "#f59e0b",
+  "Offline BO": "#f59e0b",
   "Offline - F&B": "#10b981",
 };
 const CHANNEL_FALLBACK_COLOR = "#94a3b8";
@@ -180,11 +180,15 @@ function formatCompactNumber(value) {
 }
 
 function formatInLakh(value) {
-  return `₹${(Number(value || 0) / 100000).toFixed(2)} L`;
+  const lakhValue = Number(value || 0) / 100000;
+  const decimals = Math.abs(lakhValue) >= 1 ? 0 : 2;
+  return `₹${lakhValue.toFixed(decimals)} L`;
 }
 
 function formatCountInLakh(value) {
-  return `${(Number(value || 0) / 100000).toFixed(2)} L`;
+  const lakhValue = Number(value || 0) / 100000;
+  const decimals = Math.abs(lakhValue) >= 1 ? 0 : 2;
+  return `${lakhValue.toFixed(decimals)} L`;
 }
 
 function formatInteger(value) {
@@ -211,11 +215,6 @@ function monthKeyFromDate(date) {
   return `${String(date.getMonth() + 1).padStart(2, "0")}-${year}`;
 }
 
-function getFiscalYearStart(date) {
-  const year = date.getMonth() >= 3 ? date.getFullYear() : date.getFullYear() - 1;
-  return new Date(year, 3, 1);
-}
-
 function getFiscalQuarterStart(date) {
   const month = date.getMonth();
   const year = date.getFullYear();
@@ -225,30 +224,28 @@ function getFiscalQuarterStart(date) {
   return new Date(year, 0, 1);
 }
 
+function getFiscalYearLabel(date) {
+  if (!date) return "Unknown";
+  const year = date.getFullYear();
+  const month = date.getMonth(); // April = 3
+  const fyStartYear = month >= 3 ? year : year - 1;
+  return `${String(fyStartYear).slice(-2)}-${String(fyStartYear + 1).slice(-2)}`;
+}
+
+function calendarYearForFiscalMonth(fiscalYearLabel, calendarMonthNumber) {
+  // calendarMonthNumber is 1-12 (Jan=1 ... Dec=12), matching monthKey's month part
+  const fyStartYear = 2000 + Number(fiscalYearLabel.split("-")[0]);
+  return calendarMonthNumber >= 4 ? fyStartYear : fyStartYear + 1;
+}
+
+const FISCAL_MONTH_ORDER = ["Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"];
+
 const QUICK_PERIODS = [
   { key: "thisMonth", label: "This Month" },
   { key: "lastMonth", label: "Last Month" },
   { key: "qtd", label: "QTD" },
   { key: "fytd", label: "FYTD" },
 ];
-
-function getQuickPeriodRange(key, latestDate) {
-  if (!latestDate) return null;
-  const year = latestDate.getFullYear();
-  const month = latestDate.getMonth();
-  switch (key) {
-    case "thisMonth":
-      return { rangeStart: new Date(year, month, 1), rangeEnd: latestDate };
-    case "lastMonth":
-      return { rangeStart: new Date(year, month - 1, 1), rangeEnd: new Date(year, month, 0, 23, 59, 59, 999) };
-    case "qtd":
-      return { rangeStart: getFiscalQuarterStart(latestDate), rangeEnd: latestDate };
-    case "fytd":
-      return { rangeStart: getFiscalYearStart(latestDate), rangeEnd: latestDate };
-    default:
-      return null;
-  }
-}
 
 const COMPARISON_MODES = [
   { key: "none", label: "None" },
@@ -388,6 +385,19 @@ function generateHeadlineInsight({ revenueDeltaPercent, admitsDeltaPercent, atvD
   return `Revenue ${revUp ? `saw an uplift of ${Math.abs(revenueDeltaPercent).toFixed(1)}%` : `fell ${Math.abs(revenueDeltaPercent).toFixed(1)}%`}. Admits/ATV data is incomplete for this period, so it isn't clear whether footfall or spend-per-visitor drove the change.`;
 }
 
+const PIE_LABEL_RADIAN = Math.PI / 180;
+function renderPieLabel(props) {
+  const { cx, cy, midAngle, outerRadius, percent, name, value } = props;
+  const radius = outerRadius + 26;
+  const x = cx + radius * Math.cos(-midAngle * PIE_LABEL_RADIAN);
+  const y = cy + radius * Math.sin(-midAngle * PIE_LABEL_RADIAN);
+  return (
+    <text x={x} y={y} fill="#1a202c" fontSize={12} fontWeight={600} textAnchor={x > cx ? "start" : "end"} dominantBaseline="central">
+      {`${name}: ${formatInLakh(value)} (${(percent * 100).toFixed(0)}%)`}
+    </text>
+  );
+}
+
 function renderClickableDot(dotProps, dataKey, onClick) {
   const value = dotProps.payload[dataKey];
   if (value === undefined || value === null || Number.isNaN(value)) return null;
@@ -439,7 +449,7 @@ function buildBankYearOverYear(bankName, monthKey, allRows) {
   };
 }
 
-function buildAggregateAdjacentMonthInsight(banks, monthKey, allRows) {
+function buildAggregateAdjacentMonthInsight(banks, monthKey, allRows, admitsMap) {
   const scopedRows = allRows.filter((row) => row.monthKey !== "Unknown" && (!banks.length || banks.includes(row.bankName)));
   const monthKeysWithData = [...new Set(scopedRows.map((row) => row.monthKey))].sort((a, b) => {
     const [am, ay] = a.split("-").map(Number);
@@ -450,15 +460,30 @@ function buildAggregateAdjacentMonthInsight(banks, monthKey, allRows) {
   const priorMonthKey = idx > 0 ? monthKeysWithData[idx - 1] : null;
   if (!priorMonthKey) return null;
 
-  const currentRevenue = scopedRows.filter((r) => r.monthKey === monthKey).reduce((sum, r) => sum + r.transactionTotal, 0);
-  const priorRevenue = scopedRows.filter((r) => r.monthKey === priorMonthKey).reduce((sum, r) => sum + r.transactionTotal, 0);
-  if (!priorRevenue) return null;
+  const currentRows = scopedRows.filter((r) => r.monthKey === monthKey);
+  const priorRows = scopedRows.filter((r) => r.monthKey === priorMonthKey);
+  const currentTotals = computeRowTotals(currentRows);
+  const priorTotals = computeRowTotals(priorRows);
+  if (!priorTotals.revenue) return null;
+
+  const txnDeltaPercent = priorTotals.transactions
+    ? ((currentTotals.transactions - priorTotals.transactions) / priorTotals.transactions) * 100
+    : null;
+  const currentAdmits = admitsMap ? admitsMap.get(monthKey) || 0 : 0;
+  const priorAdmits = admitsMap ? admitsMap.get(priorMonthKey) || 0 : 0;
+  const admitsDeltaPercent = priorAdmits ? ((currentAdmits - priorAdmits) / priorAdmits) * 100 : null;
 
   return {
     priorMonthKey,
-    currentRevenue,
-    priorRevenue,
-    deltaPercent: ((currentRevenue - priorRevenue) / priorRevenue) * 100,
+    currentRevenue: currentTotals.revenue,
+    priorRevenue: priorTotals.revenue,
+    deltaPercent: ((currentTotals.revenue - priorTotals.revenue) / priorTotals.revenue) * 100,
+    currentTransactions: currentTotals.transactions,
+    priorTransactions: priorTotals.transactions,
+    txnDeltaPercent,
+    currentAdmits,
+    priorAdmits,
+    admitsDeltaPercent,
   };
 }
 
@@ -575,6 +600,7 @@ function parseWorkbookRows(rows) {
       date,
       dateLabel: formatDateLabel(date),
       monthKey: monthKeyFromDate(date),
+      fiscalYear: getFiscalYearLabel(date),
       offerType: inferOfferType(offerName),
       transactionType: lookup.transactionType ? String(row[lookup.transactionType] || "").trim() || "Unknown" : "Unknown",
       universalTransactions:
@@ -630,6 +656,7 @@ function buildUpiRow(rawRow, lookup, index, previousDate) {
     date,
     dateLabel: formatDateLabel(date),
     monthKey: monthKeyFromDate(date),
+    fiscalYear: getFiscalYearLabel(date),
     offerType: "UPI Cashback",
     transactionType: "Online",
     universalTransactions: null,
@@ -701,13 +728,36 @@ function computeKpis(rows) {
   );
 }
 
-function filterGroup(rows, banks, startStr, endStr) {
-  if (!startStr || !endStr) return [];
-  const [sy, sm] = startStr.split("-").map(Number);
-  const [ey, em] = endStr.split("-").map(Number);
-  const start = new Date(sy, sm - 1, 1);
-  const end = new Date(ey, em, 0, 23, 59, 59, 999);
-  return rows.filter((r) => r.date && r.date >= start && r.date <= end && (!banks.length || banks.includes(r.bankName)));
+function filterGroupFiscal(rows, banks, fiscalYearsSelected, monthsSelected) {
+  if (!fiscalYearsSelected.length || !monthsSelected.length) return [];
+  return rows.filter(
+    (r) =>
+      r.fiscalYear &&
+      fiscalYearsSelected.includes(r.fiscalYear) &&
+      r.date &&
+      monthsSelected.includes(MONTH_NAMES[r.date.getMonth()]) &&
+      (!banks.length || banks.includes(r.bankName)),
+  );
+}
+
+function aggregateGroupBankBreakdown(groupRows) {
+  const grouped = new Map();
+  groupRows.forEach((row) => {
+    const current = grouped.get(row.bankName) || {
+      bankName: row.bankName,
+      paymentCategory: row.paymentCategory,
+      revenue: 0,
+      transactions: 0,
+      discount: 0,
+      admits: 0,
+    };
+    current.revenue += row.transactionTotal;
+    current.transactions += row.discountedTransactions;
+    current.discount += row.discountAmount;
+    current.admits += row.totalTickets || 0;
+    grouped.set(row.bankName, current);
+  });
+  return [...grouped.values()].sort((a, b) => b.revenue - a.revenue);
 }
 
 function aggregateBanks(rows) {
@@ -718,6 +768,7 @@ function aggregateBanks(rows) {
       totalRevenue: 0,
       discountCost: 0,
       totalTransactions: 0,
+      paymentCategory: row.paymentCategory,
     };
     current.totalRevenue += row.transactionTotal;
     current.discountCost += row.discountAmount;
@@ -827,8 +878,10 @@ function aggregateBubbleData(rows, colorMap) {
 
 function aggregateChannelRevenue(rows) {
   const grouped = new Map();
+  const displayNames = { "Offline - Box Office": "Offline BO" };
   rows.forEach((row) => {
-    const key = ["Online", "Offline - Box Office", "Offline - F&B"].includes(row.transactionType) ? row.transactionType : "Offline - Box Office";
+    const rawKey = ["Online", "Offline - Box Office", "Offline - F&B"].includes(row.transactionType) ? row.transactionType : "Offline - Box Office";
+    const key = displayNames[rawKey] || rawKey;
     grouped.set(key, (grouped.get(key) || 0) + row.transactionTotal);
   });
   return [...grouped.entries()]
@@ -859,24 +912,28 @@ function aggregateSeasonalByYear(rows, selectedBanks, metric = "revenue") {
   const seasonMap = new Map();
   rows.forEach((row) => {
     if (!selectedBanks.includes(row.bankName)) return;
-    if (row.monthKey === "Unknown") return;
-    const [month, year] = row.monthKey.split("-").map(Number);
+    if (row.monthKey === "Unknown" || !row.fiscalYear) return;
+    const [month] = row.monthKey.split("-").map(Number);
     if (!seasonMap.has(month)) seasonMap.set(month, { month, monthLabel: MONTH_NAMES[month - 1] });
     const current = seasonMap.get(month);
-    current[year] = (current[year] || 0) + row[field];
+    current[row.fiscalYear] = (current[row.fiscalYear] || 0) + row[field];
   });
-  return [...seasonMap.values()].sort((a, b) => a.month - b.month);
+  return [...seasonMap.values()].sort((a, b) => {
+    const fiscalIndex = (m) => (m >= 4 ? m - 4 : m + 8);
+    return fiscalIndex(a.month) - fiscalIndex(b.month);
+  });
 }
 
 function aggregateYearlyTotals(rows, selectedBanks) {
   const yearMap = new Map();
   rows.forEach((row) => {
     if (!selectedBanks.includes(row.bankName)) return;
-    if (row.monthKey === "Unknown") return;
-    const [, year] = row.monthKey.split("-").map(Number);
-    yearMap.set(year, (yearMap.get(year) || 0) + row.transactionTotal);
+    if (!row.fiscalYear || row.fiscalYear === "Unknown") return;
+    yearMap.set(row.fiscalYear, (yearMap.get(row.fiscalYear) || 0) + row.transactionTotal);
   });
-  return [...yearMap.entries()].map(([year, revenue]) => ({ year: String(year), revenue })).sort((a, b) => Number(a.year) - Number(b.year));
+  return [...yearMap.entries()]
+    .map(([year, revenue]) => ({ year, revenue }))
+    .sort((a, b) => Number(a.year.split("-")[0]) - Number(b.year.split("-")[0]));
 }
 
 function safeRatio(numerator, denominator) {
@@ -1011,105 +1068,6 @@ function MultiSelectDropdown({ options, selected, onToggle, onClear, label }) {
   );
 }
 
-function DateMultiSelectDropdown({ options, selected, onToggle, onClear, onApplyRange }) {
-  const [open, setOpen] = useState(false);
-  const panelRef = useRef(null);
-  const [rangeStart, setRangeStart] = useState("");
-  const [rangeEnd, setRangeEnd] = useState("");
-  const allSelected = options.length > 0 && selected.length === options.length;
-
-  useEffect(() => {
-    function handleClick(event) {
-      if (!panelRef.current?.contains(event.target)) setOpen(false);
-    }
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, []);
-
-  const summary =
-    selected.length === 0
-      ? "No dates selected"
-      : allSelected
-        ? "All Dates"
-        : `${selected.length} date${selected.length > 1 ? "s" : ""} selected`;
-
-  return (
-    <div ref={panelRef} className="relative">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        className="flex w-full min-w-[220px] items-center justify-between rounded-2xl border border-borderSoft bg-white px-4 py-3 text-left text-sm font-semibold text-textMain shadow-sm"
-      >
-        <span>{summary}</span>
-        <span className="text-textMuted">{open ? "▲" : "▼"}</span>
-      </button>
-      {open ? (
-        <div className="absolute left-0 z-[60] mt-2 w-full rounded-2xl border border-borderSoft bg-white p-3 shadow-soft">
-          <div className="mb-2 flex items-center justify-between">
-            <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Dates</p>
-            <button type="button" onClick={onClear} className="text-xs font-bold text-accentBlue">
-              Clear
-            </button>
-          </div>
-          <div className="mb-3 border-b border-borderSoft pb-3">
-            <p className="mb-2 text-xs font-bold uppercase tracking-[0.2em] text-textMuted">Custom Range</p>
-            <div className="flex flex-col gap-2">
-              <div>
-                <label className="mb-1 block text-[10px] font-bold uppercase text-textMuted">From</label>
-                <input type="month" value={rangeStart} onChange={(e) => setRangeStart(e.target.value)} className="w-full rounded-lg border border-borderSoft px-2 py-1.5 text-xs" />
-              </div>
-              <div>
-                <label className="mb-1 block text-[10px] font-bold uppercase text-textMuted">To</label>
-                <input type="month" value={rangeEnd} onChange={(e) => setRangeEnd(e.target.value)} className="w-full rounded-lg border border-borderSoft px-2 py-1.5 text-xs" />
-              </div>
-            </div>
-            <button
-              type="button"
-              disabled={!rangeStart || !rangeEnd}
-              onClick={() => onApplyRange(rangeStart, rangeEnd)}
-              className="mt-2 w-full rounded-lg bg-accentBlue py-1.5 text-xs font-bold text-white disabled:opacity-40"
-            >
-              Apply Range
-            </button>
-          </div>
-          <div className="max-h-56 space-y-2 overflow-y-auto pr-1 scrollbar-thin">
-            <label className="flex cursor-pointer items-center gap-3 rounded-xl px-2 py-2 hover:bg-slate-50">
-              <input
-                type="checkbox"
-                checked={allSelected}
-                onChange={(event) => {
-                  if (event.target.checked) {
-                    options.forEach((option) => {
-                      if (!selected.includes(option)) {
-                        onToggle(option);
-                      }
-                    });
-                  } else {
-                    onClear();
-                  }
-                }}
-                className="h-4 w-4 rounded border-slate-300 text-accentBlue focus:ring-accentBlue"
-              />
-              <span className="text-sm font-semibold text-textMain">Select All</span>
-            </label>
-            {options.map((option) => (
-              <label key={option} className="flex cursor-pointer items-center gap-3 rounded-xl px-2 py-2 hover:bg-slate-50">
-                <input
-                  type="checkbox"
-                  checked={selected.includes(option)}
-                  onChange={() => onToggle(option)}
-                  className="h-4 w-4 rounded border-slate-300 text-accentBlue focus:ring-accentBlue"
-                />
-                <span className="text-sm font-semibold text-textMain">{option}</span>
-              </label>
-            ))}
-          </div>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 function OfferModal({ offer, onClose }) {
   if (!offer) return null;
 
@@ -1121,7 +1079,10 @@ function OfferModal({ offer, onClose }) {
       >
         <div className="flex items-start justify-between gap-4">
           <div>
-            <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">{offer.bankName}</p>
+            <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">
+              {offer.bankName}
+              {offer.paymentCategory === "UPI" ? " (UPI)" : ""}
+            </p>
             <h3 className="mt-2 font-display text-2xl font-bold text-textMain">{offer.offerName}</h3>
             <p className="mt-2 inline-flex rounded-full bg-blue-50 px-3 py-1 text-xs font-bold text-accentBlue">{offer.offerType}</p>
           </div>
@@ -1340,6 +1301,47 @@ function OffersByBankModal({
   );
 }
 
+function GroupDetailModal({ group, breakdown, onClose }) {
+  if (!group) return null;
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="max-h-[80vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="font-display text-xl font-bold text-textMain">Group {group} — Bank/UPI Breakdown</h3>
+          <button type="button" onClick={onClose} className="text-sm font-bold text-textMuted hover:text-textMain">
+            ✕ Close
+          </button>
+        </div>
+        <table className="min-w-full text-sm">
+          <thead>
+            <tr className="text-left text-xs font-bold uppercase tracking-[0.15em] text-textMuted">
+              <th className="py-2 pr-4">Bank / Partner</th>
+              <th className="py-2 pr-4">Revenue</th>
+              <th className="py-2 pr-4">Transactions</th>
+              <th className="py-2 pr-4">Discount Amount</th>
+              <th className="py-2 pr-4">Admits</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-borderSoft">
+            {breakdown.map((entry) => (
+              <tr key={entry.bankName}>
+                <td className="py-2 pr-4 font-semibold text-textMain">
+                  {entry.bankName}
+                  {entry.paymentCategory === "UPI" ? " (UPI)" : ""}
+                </td>
+                <td className="py-2 pr-4 text-textMain">{formatInLakh(entry.revenue)}</td>
+                <td className="py-2 pr-4 text-textMain">{formatCountInLakh(entry.transactions)}</td>
+                <td className="py-2 pr-4 text-textMain">{formatInLakh(entry.discount)}</td>
+                <td className="py-2 pr-4 text-textMain">{formatCountInLakh(entry.admits)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function DiscountSplitTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null;
   const data = payload[0].payload;
@@ -1388,6 +1390,37 @@ function MetricBlock({ title, value }) {
   );
 }
 
+function MetricRow({ label, current, format, deltaPercent }) {
+  const known = deltaPercent !== null && deltaPercent !== undefined && !Number.isNaN(deltaPercent);
+  const positive = known && deltaPercent >= 0;
+  return (
+    <div className="flex items-center justify-between border-b border-borderSoft/60 py-2 last:border-0">
+      <span className="text-xs font-semibold text-textMuted">{label}</span>
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-bold text-textMain">{current === null || current === undefined ? "—" : format(current)}</span>
+        {known ? (
+          <span className={`inline-flex items-center gap-0.5 text-xs font-bold ${positive ? "text-emerald-600" : "text-rose-500"}`}>
+            {positive ? "▲" : "▼"} {Math.abs(deltaPercent).toFixed(1)}%
+          </span>
+        ) : (
+          <span className="text-xs text-textMuted">—</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MetricComparisonBox({ title, metrics }) {
+  return (
+    <div className="flex-1 rounded-xl border border-borderSoft bg-white p-3">
+      <p className="mb-1 text-xs font-bold uppercase tracking-[0.15em] text-textMuted">{title}</p>
+      {metrics.map((m) => (
+        <MetricRow key={m.label} {...m} />
+      ))}
+    </div>
+  );
+}
+
 export default function App() {
   const [rows, setRows] = useState([]);
   const [fileName, setFileName] = useState("");
@@ -1397,7 +1430,8 @@ export default function App() {
   const [upiFileName, setUpiFileName] = useState("");
   const [upiError, setUpiError] = useState("");
   const [upiDragActive, setUpiDragActive] = useState(false);
-  const [dateFilter, setDateFilter] = useState([]);
+  const [fyFilter, setFyFilter] = useState([]);
+  const [monthFilter, setMonthFilter] = useState([]);
   const [bankFilter, setBankFilter] = useState([]);
   const [offerFilter, setOfferFilter] = useState([]);
   const [paymentCategoryFilter, setPaymentCategoryFilter] = useState("all"); // "all" | "card" | "upi"
@@ -1408,6 +1442,8 @@ export default function App() {
   const [expandedOfferBank, setExpandedOfferBank] = useState(null);
   const [showOffersByUpi, setShowOffersByUpi] = useState(false);
   const [expandedOfferUpiPartner, setExpandedOfferUpiPartner] = useState(null);
+  const [showComparisonModal, setShowComparisonModal] = useState(false);
+  const [groupDetailOpen, setGroupDetailOpen] = useState(null); // null | "A" | "B"
   const [comparisonMode, setComparisonMode] = useState("none");
   const [trendMode, setTrendMode] = useState("monthly");
   const [seasonalMetric, setSeasonalMetric] = useState("revenue");
@@ -1419,11 +1455,11 @@ export default function App() {
   const [offerSortKey, setOfferSortKey] = useState(null);
   const [offerSortDir, setOfferSortDir] = useState("desc");
   const [groupABanks, setGroupABanks] = useState([]);
-  const [groupADateStart, setGroupADateStart] = useState("");
-  const [groupADateEnd, setGroupADateEnd] = useState("");
+  const [groupAFy, setGroupAFy] = useState([]);
+  const [groupAMonths, setGroupAMonths] = useState([]);
   const [groupBBanks, setGroupBBanks] = useState([]);
-  const [groupBDateStart, setGroupBDateStart] = useState("");
-  const [groupBDateEnd, setGroupBDateEnd] = useState("");
+  const [groupBFy, setGroupBFy] = useState([]);
+  const [groupBMonths, setGroupBMonths] = useState([]);
   const fileInputRef = useRef(null);
   const upiFileInputRef = useRef(null);
 
@@ -1439,45 +1475,64 @@ export default function App() {
     const bankScopedRows = bankFilter.length ? categoryScopedRows.filter((row) => bankFilter.includes(row.bankName)) : categoryScopedRows;
     return [...new Set(bankScopedRows.map((row) => canonicalOfferName(row.offerName)))].sort();
   }, [categoryScopedRows, bankFilter]);
-  const dates = useMemo(
-    () =>
-      [...new Set(rows.map((row) => row.dateLabel))].sort((left, right) => {
-        const leftDate = rows.find((row) => row.dateLabel === left)?.date?.getTime() || 0;
-        const rightDate = rows.find((row) => row.dateLabel === right)?.date?.getTime() || 0;
-        return rightDate - leftDate;
-      }),
-    [rows],
-  );
+  const fiscalYears = useMemo(() => {
+    const set = new Set(rows.map((r) => r.fiscalYear).filter((fy) => fy && fy !== "Unknown"));
+    return [...set].sort((a, b) => Number(a.split("-")[0]) - Number(b.split("-")[0]));
+  }, [rows]);
+
+  const fiscalMonths = useMemo(() => {
+    const present = new Set(rows.map((r) => (r.date ? MONTH_NAMES[r.date.getMonth()] : null)));
+    return FISCAL_MONTH_ORDER.filter((m) => present.has(m));
+  }, [rows]);
 
   const latestDataDate = useMemo(
     () => rows.reduce((max, row) => (row.date && (!max || row.date > max) ? row.date : max), null),
     [rows],
   );
 
-  const quickPeriodLabelSets = useMemo(() => {
+  const quickPeriodFilterSets = useMemo(() => {
     if (!latestDataDate) return {};
-    return QUICK_PERIODS.reduce((acc, preset) => {
-      const range = getQuickPeriodRange(preset.key, latestDataDate);
-      const labels = new Set();
-      rows.forEach((row) => {
-        if (row.date && row.date >= range.rangeStart && row.date <= range.rangeEnd) {
-          labels.add(row.dateLabel);
-        }
-      });
-      acc[preset.key] = [...labels].sort();
-      return acc;
-    }, {});
-  }, [latestDataDate, rows]);
+    const month = latestDataDate.getMonth();
+    const fy = getFiscalYearLabel(latestDataDate);
+    const fyStartYear = Number(fy.split("-")[0]) + 2000;
+    const result = {};
+
+    result.thisMonth = { fy, months: [MONTH_NAMES[month]] };
+
+    const prior = new Date(latestDataDate.getFullYear(), month - 1, 1);
+    result.lastMonth = { fy: getFiscalYearLabel(prior), months: [MONTH_NAMES[prior.getMonth()]] };
+
+    const qtdMonths = [];
+    for (let d = new Date(getFiscalQuarterStart(latestDataDate)); d <= latestDataDate; d.setMonth(d.getMonth() + 1)) {
+      qtdMonths.push(MONTH_NAMES[d.getMonth()]);
+    }
+    result.qtd = { fy, months: qtdMonths };
+
+    const fytdMonths = [];
+    for (let d = new Date(fyStartYear, 3, 1); d <= latestDataDate; d.setMonth(d.getMonth() + 1)) {
+      fytdMonths.push(MONTH_NAMES[d.getMonth()]);
+    }
+    result.fytd = { fy, months: fytdMonths };
+
+    return result;
+  }, [latestDataDate]);
 
   const activeQuickPeriodKey = useMemo(() => {
-    if (!dateFilter.length) return "clear";
-    const sortedFilter = [...dateFilter].sort();
+    if (!fyFilter.length && !monthFilter.length) return "clear";
+    const sortedMonths = [...monthFilter].sort();
     const match = QUICK_PERIODS.find((preset) => {
-      const labels = quickPeriodLabelSets[preset.key] || [];
-      return labels.length === sortedFilter.length && labels.every((label, index) => label === sortedFilter[index]);
+      const target = quickPeriodFilterSets[preset.key];
+      if (!target) return false;
+      const sortedTarget = [...target.months].sort();
+      return (
+        fyFilter.length === 1 &&
+        fyFilter[0] === target.fy &&
+        sortedTarget.length === sortedMonths.length &&
+        sortedTarget.every((m, index) => m === sortedMonths[index])
+      );
     });
     return match ? match.key : null;
-  }, [dateFilter, quickPeriodLabelSets]);
+  }, [fyFilter, monthFilter, quickPeriodFilterSets]);
 
   const bankColorMap = useMemo(
     () =>
@@ -1495,8 +1550,12 @@ export default function App() {
   }, [seasonalMetric, trendMode, bankFilter]);
 
   useEffect(() => {
-    setDateFilter(dates);
-  }, [dates]);
+    setFyFilter(fiscalYears);
+  }, [fiscalYears]);
+
+  useEffect(() => {
+    setMonthFilter(fiscalMonths);
+  }, [fiscalMonths]);
 
   useEffect(() => {
     setBankFilter(banks);
@@ -1540,7 +1599,8 @@ export default function App() {
     setFileName("");
     setError("");
     setMissingColumns([]);
-    setDateFilter([]);
+    setFyFilter([]);
+    setMonthFilter([]);
     setBankFilter([]);
     setOfferFilter([]);
     setSelectedOffer(null);
@@ -1581,26 +1641,17 @@ export default function App() {
     if (upiFileInputRef.current) upiFileInputRef.current.value = "";
   }
 
-  function applyDateRange(startStr, endStr) {
-    const [startYear, startMonth] = startStr.split("-").map(Number);
-    const [endYear, endMonth] = endStr.split("-").map(Number);
-    const start = new Date(startYear, startMonth - 1, 1);
-    const end = new Date(endYear, endMonth, 0, 23, 59, 59, 999);
-    const matching = [...new Set(rows.filter((row) => row.date && row.date >= start && row.date <= end).map((row) => row.dateLabel))];
-    setDateFilter(matching);
-  }
-
   const filteredRows = useMemo(
     () =>
       rows.filter((row) => {
-        const matchesDate = dateFilter.includes(row.dateLabel);
+        const matchesDate = fyFilter.includes(row.fiscalYear) && (row.date ? monthFilter.includes(MONTH_NAMES[row.date.getMonth()]) : false);
         const matchesBank = bankFilter.includes(row.bankName);
         const matchesOffer = offerFilter.includes(canonicalOfferName(row.offerName));
         const matchesPaymentCategory =
           paymentCategoryFilter === "all" || row.paymentCategory === (paymentCategoryFilter === "card" ? "Card" : "UPI");
         return matchesDate && matchesBank && matchesOffer && matchesPaymentCategory;
       }),
-    [rows, dateFilter, bankFilter, offerFilter, paymentCategoryFilter],
+    [rows, fyFilter, monthFilter, bankFilter, offerFilter, paymentCategoryFilter],
   );
 
   const bankOfferFilteredRows = useMemo(
@@ -1655,6 +1706,8 @@ export default function App() {
     [atpAvtKpis],
   );
 
+  console.log("[ATP DEBUG]", { paymentCategoryFilter, atpAvtSourceRowsLength: atpAvtSourceRows.length, atp, avt });
+
   const universalATP = useMemo(() => {
     const activeMonths = [...new Set(filteredRows.map((r) => r.monthKey).filter((k) => k !== "Unknown"))];
     const validMonths = activeMonths.filter((key) => universalTicketRevenueData.map.has(key) && admitsData.map.has(key));
@@ -1679,18 +1732,25 @@ export default function App() {
   );
 
   const groupARows = useMemo(
-    () => filterGroup(rows, groupABanks, groupADateStart, groupADateEnd),
-    [rows, groupABanks, groupADateStart, groupADateEnd],
+    () => filterGroupFiscal(rows, groupABanks, groupAFy, groupAMonths),
+    [rows, groupABanks, groupAFy, groupAMonths],
   );
   const groupBRows = useMemo(
-    () => filterGroup(rows, groupBBanks, groupBDateStart, groupBDateEnd),
-    [rows, groupBBanks, groupBDateStart, groupBDateEnd],
+    () => filterGroupFiscal(rows, groupBBanks, groupBFy, groupBMonths),
+    [rows, groupBBanks, groupBFy, groupBMonths],
   );
   const groupAKpis = useMemo(() => computeKpis(groupARows), [groupARows]);
   const groupBKpis = useMemo(() => computeKpis(groupBRows), [groupBRows]);
   const groupADiscountRate = safeRatio(groupAKpis.totalDiscount, groupAKpis.grossRevenue);
   const groupBDiscountRate = safeRatio(groupBKpis.totalDiscount, groupBKpis.grossRevenue);
-  const groupRevenueDeltaPercent = computeDelta(groupBKpis.grossRevenue, groupAKpis.grossRevenue);
+  const groupACardCount = new Set(groupARows.filter((r) => r.paymentCategory === "Card").map((r) => r.bankName)).size;
+  const groupAUpiCount = new Set(groupARows.filter((r) => r.paymentCategory === "UPI").map((r) => r.bankName)).size;
+  const groupBCardCount = new Set(groupBRows.filter((r) => r.paymentCategory === "Card").map((r) => r.bankName)).size;
+  const groupBUpiCount = new Set(groupBRows.filter((r) => r.paymentCategory === "UPI").map((r) => r.bankName)).size;
+  const groupABankBreakdown = useMemo(() => aggregateGroupBankBreakdown(groupARows), [groupARows]);
+  const groupBBankBreakdown = useMemo(() => aggregateGroupBankBreakdown(groupBRows), [groupBRows]);
+  const groupAAdmits = useMemo(() => groupARows.reduce((sum, r) => sum + (r.totalTickets || 0), 0), [groupARows]);
+  const groupBAdmits = useMemo(() => groupBRows.reduce((sum, r) => sum + (r.totalTickets || 0), 0), [groupBRows]);
 
   const comparisonKpis = useMemo(() => {
     if (comparisonMode === "none") return null;
@@ -1824,12 +1884,12 @@ export default function App() {
 
   const rankScopeRows = useMemo(() => {
     return rows.filter((row) => {
-      const matchesDate = dateFilter.includes(row.dateLabel);
+      const matchesDate = fyFilter.includes(row.fiscalYear) && (row.date ? monthFilter.includes(MONTH_NAMES[row.date.getMonth()]) : false);
       const matchesCategory =
         paymentCategoryFilter === "all" || row.paymentCategory === (paymentCategoryFilter === "card" ? "Card" : "UPI");
       return matchesDate && matchesCategory;
     });
-  }, [rows, dateFilter, paymentCategoryFilter]);
+  }, [rows, fyFilter, monthFilter, paymentCategoryFilter]);
 
   const globalBankRows = useMemo(() => aggregateBanks(rankScopeRows), [rankScopeRows]);
   const globalBankRankMap = useMemo(() => {
@@ -1852,13 +1912,28 @@ export default function App() {
   }, [offerRows, offerSortKey, offerSortDir]);
   const categoryDateOfferScopedRows = useMemo(() => {
     return rows.filter((row) => {
-      const matchesDate = dateFilter.includes(row.dateLabel);
+      const matchesDate = fyFilter.includes(row.fiscalYear) && (row.date ? monthFilter.includes(MONTH_NAMES[row.date.getMonth()]) : false);
       const matchesOffer = offerFilter.includes(canonicalOfferName(row.offerName));
       const matchesCategory =
         paymentCategoryFilter === "all" || row.paymentCategory === (paymentCategoryFilter === "card" ? "Card" : "UPI");
       return matchesDate && matchesOffer && matchesCategory;
     });
-  }, [rows, dateFilter, offerFilter, paymentCategoryFilter]);
+  }, [rows, fyFilter, monthFilter, offerFilter, paymentCategoryFilter]);
+
+  const bankActiveRangeMap = useMemo(() => {
+    const map = new Map();
+    categoryDateOfferScopedRows.forEach((row) => {
+      if (!row.date) return;
+      const existing = map.get(row.bankName);
+      if (!existing) {
+        map.set(row.bankName, { start: row.date, end: row.date });
+      } else {
+        if (row.date < existing.start) existing.start = row.date;
+        if (row.date > existing.end) existing.end = row.date;
+      }
+    });
+    return map;
+  }, [categoryDateOfferScopedRows]);
 
   const monthlySeries = useMemo(
     () => aggregateMonthlySeries(categoryDateOfferScopedRows, bankFilter),
@@ -1944,14 +2019,36 @@ export default function App() {
     setExpandedOfferUpiPartner((current) => (current === partnerName ? null : partnerName));
   }
 
-  function applyQuickPeriod(rangeStart, rangeEnd) {
-    const labels = new Set();
-    rows.forEach((row) => {
-      if (row.date && row.date >= rangeStart && row.date <= rangeEnd) {
-        labels.add(row.dateLabel);
+  function applyQuickPeriod(key, latestDate) {
+    if (!latestDate) return;
+    const fy = getFiscalYearLabel(latestDate);
+    const monthName = MONTH_NAMES[latestDate.getMonth()];
+    const fyStartYear = Number(fy.split("-")[0]) + 2000;
+
+    if (key === "thisMonth") {
+      setFyFilter([fy]);
+      setMonthFilter([monthName]);
+    } else if (key === "lastMonth") {
+      const prior = new Date(latestDate.getFullYear(), latestDate.getMonth() - 1, 1);
+      setFyFilter([getFiscalYearLabel(prior)]);
+      setMonthFilter([MONTH_NAMES[prior.getMonth()]]);
+    } else if (key === "qtd") {
+      const quarterStart = getFiscalQuarterStart(latestDate);
+      const months = [];
+      for (let d = new Date(quarterStart); d <= latestDate; d.setMonth(d.getMonth() + 1)) {
+        months.push(MONTH_NAMES[d.getMonth()]);
       }
-    });
-    setDateFilter([...labels]);
+      setFyFilter([fy]);
+      setMonthFilter(months);
+    } else if (key === "fytd") {
+      const fyStart = new Date(fyStartYear, 3, 1);
+      const months = [];
+      for (let d = new Date(fyStart); d <= latestDate; d.setMonth(d.getMonth() + 1)) {
+        months.push(MONTH_NAMES[d.getMonth()]);
+      }
+      setFyFilter([fy]);
+      setMonthFilter(months);
+    }
   }
 
   const selectedBankRow = useMemo(() => bankRows.find((bank) => bank.bankName === selectedBank) || null, [bankRows, selectedBank]);
@@ -2019,6 +2116,8 @@ export default function App() {
       currentTotal,
       priorTotal,
       totalDeltaPercent,
+      currentTransactions: currentTotals.transactions,
+      priorTransactions: priorTotals.transactions,
       txnDeltaPercent,
       currentDiscountRate,
       priorDiscountRate,
@@ -2042,19 +2141,20 @@ export default function App() {
     if (!selectedSeasonalPoint) return [];
     const { month } = selectedSeasonalPoint;
 
-    const relevantRowsForMonth = (year) =>
-      categoryDateOfferScopedRows.filter(
+    const relevantRowsForMonth = (fiscalYearLabel) => {
+      const calYear = calendarYearForFiscalMonth(fiscalYearLabel, month);
+      return categoryDateOfferScopedRows.filter(
         (r) =>
           r.monthKey !== "Unknown" &&
           Number(r.monthKey.split("-")[0]) === month &&
-          Number(r.monthKey.split("-")[1]) === year &&
+          Number(r.monthKey.split("-")[1]) === calYear &&
           (!bankFilter.length || bankFilter.includes(r.bankName)),
       );
+    };
 
     const yearsWithData = seasonalYears
-      .map(Number)
-      .filter((year) => relevantRowsForMonth(year).length > 0)
-      .sort((a, b) => a - b);
+      .filter((fy) => relevantRowsForMonth(fy).length > 0)
+      .sort((a, b) => Number(a.split("-")[0]) - Number(b.split("-")[0]));
 
     const pairs = [];
     for (let i = 1; i < yearsWithData.length; i++) {
@@ -2085,39 +2185,36 @@ export default function App() {
   const momAdjacentMonthInsight = useMemo(() => {
     if (!selectedSeasonalPoint) return null;
     const { month } = selectedSeasonalPoint;
-    const relevantRowsForMonth = (year) =>
-      categoryDateOfferScopedRows.filter(
+    const relevantRowsForMonth = (fiscalYearLabel) => {
+      const calYear = calendarYearForFiscalMonth(fiscalYearLabel, month);
+      return categoryDateOfferScopedRows.filter(
         (r) =>
           r.monthKey !== "Unknown" &&
           Number(r.monthKey.split("-")[0]) === month &&
-          Number(r.monthKey.split("-")[1]) === year &&
+          Number(r.monthKey.split("-")[1]) === calYear &&
           (!bankFilter.length || bankFilter.includes(r.bankName)),
       );
+    };
     const yearsWithData = seasonalYears
-      .map(Number)
-      .filter((year) => relevantRowsForMonth(year).length > 0)
-      .sort((a, b) => a - b);
+      .filter((fy) => relevantRowsForMonth(fy).length > 0)
+      .sort((a, b) => Number(a.split("-")[0]) - Number(b.split("-")[0]));
     if (!yearsWithData.length) return null;
     const currentYear = yearsWithData[yearsWithData.length - 1];
-    const monthKey = `${String(month).padStart(2, "0")}-${currentYear}`;
-    return buildAggregateAdjacentMonthInsight(bankFilter, monthKey, categoryDateOfferScopedRows);
-  }, [selectedSeasonalPoint, seasonalYears, categoryDateOfferScopedRows, bankFilter]);
+    const calYear = calendarYearForFiscalMonth(currentYear, month);
+    const monthKey = `${String(month).padStart(2, "0")}-${calYear}`;
+    return buildAggregateAdjacentMonthInsight(bankFilter, monthKey, categoryDateOfferScopedRows, admitsData.map);
+  }, [selectedSeasonalPoint, seasonalYears, categoryDateOfferScopedRows, bankFilter, admitsData]);
 
   const yearInsight = useMemo(() => {
     if (!selectedYearPoint) return null;
     const { year } = selectedYearPoint;
 
     const relevantRowsForYear = (y) =>
-      categoryDateOfferScopedRows.filter(
-        (r) =>
-          r.monthKey !== "Unknown" &&
-          Number(r.monthKey.split("-")[1]) === y &&
-          (!bankFilter.length || bankFilter.includes(r.bankName)),
-      );
+      categoryDateOfferScopedRows.filter((r) => r.fiscalYear === y && (!bankFilter.length || bankFilter.includes(r.bankName)));
 
     const candidateYears = [
-      ...new Set(categoryDateOfferScopedRows.filter((r) => r.monthKey !== "Unknown").map((r) => Number(r.monthKey.split("-")[1]))),
-    ].sort((a, b) => a - b);
+      ...new Set(categoryDateOfferScopedRows.filter((r) => r.fiscalYear && r.fiscalYear !== "Unknown").map((r) => r.fiscalYear)),
+    ].sort((a, b) => Number(a.split("-")[0]) - Number(b.split("-")[0]));
     const yearsWithData = candidateYears.filter((y) => relevantRowsForYear(y).length > 0);
     const idx = yearsWithData.indexOf(year);
     const priorYear = idx > 0 ? yearsWithData[idx - 1] : null;
@@ -2147,7 +2244,7 @@ export default function App() {
     } else if (trendMode === "yoy") {
       if (selectedYearPoint || !yearlyData.length) return;
       const latestRow = yearlyData[yearlyData.length - 1];
-      setSelectedYearPoint({ year: Number(latestRow.year) });
+      setSelectedYearPoint({ year: latestRow.year });
     }
   }
 
@@ -2159,6 +2256,13 @@ export default function App() {
           <div className="flex items-center gap-3">
             <img src={pvrInoxLogo} alt="PVR INOX" className="h-7 w-auto" />
             <h1 className="font-display text-base font-bold text-textMain sm:text-lg">BANK OFFERS PERFORMANCE</h1>
+            <button
+              type="button"
+              onClick={() => setShowComparisonModal(true)}
+              className="flex items-center gap-1.5 rounded-full border-2 border-accentBlue bg-accentBlue px-4 py-1.5 text-xs font-extrabold uppercase tracking-wide text-white shadow-sm transition hover:bg-blue-700"
+            >
+              ⇄ Comparison Module
+            </button>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -2167,10 +2271,7 @@ export default function App() {
                 key={preset.key}
                 type="button"
                 disabled={!latestDataDate}
-                onClick={() => {
-                  const range = getQuickPeriodRange(preset.key, latestDataDate);
-                  if (range) applyQuickPeriod(range.rangeStart, range.rangeEnd);
-                }}
+                onClick={() => applyQuickPeriod(preset.key, latestDataDate)}
                 className={`rounded-full border px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide transition disabled:cursor-not-allowed disabled:opacity-40 ${
                   activeQuickPeriodKey === preset.key
                     ? "border-accentBlue bg-accentBlue text-white"
@@ -2182,7 +2283,10 @@ export default function App() {
             ))}
             <button
               type="button"
-              onClick={() => setDateFilter([])}
+              onClick={() => {
+                setFyFilter([]);
+                setMonthFilter([]);
+              }}
               className={`rounded-full border px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide transition ${
                 activeQuickPeriodKey === "clear"
                   ? "border-accentBlue bg-accentBlue text-white"
@@ -2317,17 +2421,19 @@ export default function App() {
               ))}
             </div>
             <div className="flex flex-1 flex-wrap items-center justify-center gap-3">
-              <DateMultiSelectDropdown
-                options={dates}
-                selected={dateFilter}
-                onToggle={(date) => {
-                  setDateFilter((current) => (current.includes(date) ? current.filter((item) => item !== date) : [...current, date]));
-                }}
-                onClear={() => {
-                  console.log("[Clear audit] Date filter cleared, new value:", []);
-                  setDateFilter([]);
-                }}
-                onApplyRange={applyDateRange}
+              <MultiSelectDropdown
+                options={fiscalYears}
+                selected={fyFilter}
+                onToggle={(fy) => setFyFilter((current) => (current.includes(fy) ? current.filter((item) => item !== fy) : [...current, fy]))}
+                onClear={() => setFyFilter([])}
+                label="FY"
+              />
+              <MultiSelectDropdown
+                options={fiscalMonths}
+                selected={monthFilter}
+                onToggle={(month) => setMonthFilter((current) => (current.includes(month) ? current.filter((item) => item !== month) : [...current, month]))}
+                onClear={() => setMonthFilter([])}
+                label="month"
               />
               <MultiSelectDropdown
                 options={banks}
@@ -2597,7 +2703,10 @@ export default function App() {
                       const split = discountByBankName.get(bank.bankName);
                       return (
                         <tr key={bank.bankName} className={`${index % 2 === 0 ? "bg-white" : "bg-slate-50/60"} cursor-pointer transition hover:bg-blue-50/70`} onClick={() => toggleSelectedBank(bank.bankName)}>
-                          <td className="px-4 py-3 font-bold text-textMain">{bank.bankName}</td>
+                          <td className="px-4 py-3 font-bold text-textMain">
+                            {bank.bankName}
+                            {bank.paymentCategory === "UPI" ? " (UPI)" : ""}
+                          </td>
                           <td className="px-4 py-3 font-semibold text-textMain">
                             {formatCountInLakh(bank.totalTransactions)}
                             <span className="ml-1 text-xs font-bold text-textMuted">
@@ -2637,9 +2746,12 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex h-[488px] flex-col justify-center overflow-hidden rounded-[2rem] border border-white/60 bg-white/90 p-5 shadow-soft">
-            <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Discount Split</p>
+          <div className="flex h-[488px] flex-col justify-start overflow-hidden rounded-[2rem] border border-white/60 bg-white/90 p-5 shadow-soft">
+            <p className="text-sm font-bold uppercase tracking-[0.24em] text-textMuted">Discount Split By Partners</p>
             <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Overall Bank / UPI vs PVR Contribution</h2>
+            <p className="mt-1 text-sm font-semibold text-textMuted">
+              Total Discount: {formatInLakh(overallSplit.totalBank + overallSplit.totalPvr)}
+            </p>
             <div className="mt-6 flex flex-col gap-6">
               <div>
                 <div className="flex items-center justify-between text-sm font-bold text-textMain">
@@ -2677,15 +2789,16 @@ export default function App() {
               </span>
               {channelData.length ? (
                 <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
+                  <PieChart margin={{ top: 30, right: 100, bottom: 30, left: 100 }}>
                     <Pie
                       data={channelData}
                       dataKey="value"
                       nameKey="name"
                       cx="50%"
                       cy="50%"
-                      outerRadius={110}
-                      label={({ name, value, percent }) => `${name}: ${formatInLakh(value)} (${(percent * 100).toFixed(0)}%)`}
+                      outerRadius={75}
+                      label={renderPieLabel}
+                      labelLine={{ stroke: "#94a3b8", strokeWidth: 1 }}
                     >
                       {channelData.map((entry) => (
                         <Cell key={entry.name} fill={CHANNEL_COLORS[entry.name] || CHANNEL_FALLBACK_COLOR} />
@@ -2712,15 +2825,16 @@ export default function App() {
               </span>
               {filteredRows.length ? (
                 <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
+                  <PieChart margin={{ top: 30, right: 100, bottom: 30, left: 100 }}>
                     <Pie
                       data={ticketVsFnbData}
                       dataKey="value"
                       nameKey="name"
                       cx="50%"
                       cy="50%"
-                      outerRadius={110}
-                      label={({ name, value, percent }) => `${name}: ${formatInLakh(value)} (${(percent * 100).toFixed(0)}%)`}
+                      outerRadius={75}
+                      label={renderPieLabel}
+                      labelLine={{ stroke: "#94a3b8", strokeWidth: 1 }}
                     >
                       {ticketVsFnbData.map((entry) => (
                         <Cell key={entry.name} fill={TICKET_FNB_COLORS[entry.name]} />
@@ -2743,7 +2857,7 @@ export default function App() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Offer Directory</p>
-              <h2 className="mt-1 font-display text-2xl font-bold text-textMain">All offers grouped by bank / UPI Partners</h2>
+              <h2 className="mt-1 font-display text-2xl font-bold text-textMain">All offers grouped by Bank / UPI Partners</h2>
             </div>
             {offerSortKey ? (
               <button
@@ -2761,7 +2875,7 @@ export default function App() {
                 <thead className="sticky top-0 bg-slate-50/95 backdrop-blur">
                   <tr>
                     <th className="px-4 py-3 text-left font-bold uppercase tracking-[0.18em] text-textMuted">
-                      Bank
+                      Bank/UPI
                       <span className="mt-0.5 block text-[10px] font-semibold normal-case tracking-normal text-textMuted/70">
                         ({banks.length} banks)
                       </span>
@@ -2826,7 +2940,10 @@ export default function App() {
                 <tbody>
                   {sortedOfferRows.length ? sortedOfferRows.map((offer, index) => (
                     <tr key={`${offer.offerName}-${offer.bankName}`} className={`${index % 2 === 0 ? "bg-white" : "bg-slate-50/60"} cursor-pointer transition hover:bg-blue-50/70`} onClick={() => setSelectedOffer(offer)}>
-                      <td className="px-4 py-3 font-semibold text-textMain">{offer.bankName}</td>
+                      <td className="px-4 py-3 font-semibold text-textMain">
+                        {offer.bankName}
+                        {offer.paymentCategory === "UPI" ? " (UPI)" : ""}
+                      </td>
                       <td className="px-4 py-3 font-bold text-textMain">{offer.offerName}</td>
                       <td className="px-4 py-3 font-semibold text-textMain">{formatCountInLakh(offer.transactions)}</td>
                       <td className="px-4 py-3 font-semibold text-textMain">
@@ -3001,7 +3118,7 @@ export default function App() {
                     radius={[8, 8, 0, 0]}
                     cursor="pointer"
                     activeBar={{ fill: "#1d4ed8" }}
-                    onClick={(data) => setSelectedYearPoint({ year: Number(data.year) })}
+                    onClick={(data) => setSelectedYearPoint({ year: data.year })}
                   >
                     <LabelList dataKey="revenue" position="top" formatter={(value) => formatInLakh(value)} style={{ fontSize: 12, fontWeight: 700, fill: "#1a202c" }} />
                   </Bar>
@@ -3030,33 +3147,34 @@ export default function App() {
                 </button>
               </div>
 
-              <div className="mb-3 space-y-1 rounded-xl bg-blue-50 p-3">
-                <p className="text-sm font-semibold text-blue-900">
-                  Last Year vs Current Year:{" "}
-                  {inferencePairs.length ? (
-                    (() => {
-                      const latest = inferencePairs[inferencePairs.length - 1];
-                      return latest.totalDeltaPercent === null ? (
-                        "—"
-                      ) : (
-                        <>
-                          {formatInLakh(latest.priorTotal)} → {formatInLakh(latest.currentTotal)} (
-                          {latest.totalDeltaPercent >= 0 ? "▲" : "▼"} {Math.abs(latest.totalDeltaPercent).toFixed(1)}%)
-                        </>
-                      );
-                    })()
-                  ) : (
-                    "—"
-                  )}
-                </p>
-                <p className="text-sm font-semibold text-blue-900">
-                  Current Month vs Last Month:{" "}
-                  {momAdjacentMonthInsight
-                    ? `${formatInLakh(momAdjacentMonthInsight.priorRevenue)} → ${formatInLakh(momAdjacentMonthInsight.currentRevenue)} (${
-                        momAdjacentMonthInsight.deltaPercent >= 0 ? "▲" : "▼"
-                      } ${Math.abs(momAdjacentMonthInsight.deltaPercent).toFixed(1)}%)`
-                    : "—"}
-                </p>
+              <div className="mb-3 flex flex-col gap-3 sm:flex-row">
+                <MetricComparisonBox
+                  title="Last Month vs Current"
+                  metrics={[
+                    { label: "Revenue", current: momAdjacentMonthInsight?.currentRevenue, format: formatInLakh, deltaPercent: momAdjacentMonthInsight?.deltaPercent ?? null },
+                    { label: "Admits", current: momAdjacentMonthInsight?.currentAdmits, format: formatCountInLakh, deltaPercent: momAdjacentMonthInsight?.admitsDeltaPercent ?? null },
+                    { label: "Transactions", current: momAdjacentMonthInsight?.currentTransactions, format: formatCountInLakh, deltaPercent: momAdjacentMonthInsight?.txnDeltaPercent ?? null },
+                  ]}
+                />
+                <MetricComparisonBox
+                  title="Last Year vs Current"
+                  metrics={
+                    inferencePairs.length
+                      ? (() => {
+                          const latest = inferencePairs[inferencePairs.length - 1];
+                          return [
+                            { label: "Revenue", current: latest.currentTotal, format: formatInLakh, deltaPercent: latest.totalDeltaPercent },
+                            { label: "Admits", current: latest.currentAdmits, format: formatCountInLakh, deltaPercent: latest.admitsDeltaPercent },
+                            { label: "Transactions", current: latest.currentTransactions, format: formatCountInLakh, deltaPercent: latest.txnDeltaPercent },
+                          ];
+                        })()
+                      : [
+                          { label: "Revenue", current: null, format: formatInLakh, deltaPercent: null },
+                          { label: "Admits", current: null, format: formatCountInLakh, deltaPercent: null },
+                          { label: "Transactions", current: null, format: formatCountInLakh, deltaPercent: null },
+                        ]
+                  }
+                />
               </div>
 
               {inferencePairs.length === 0 ? (
@@ -3076,26 +3194,36 @@ export default function App() {
                       Shows the size of the year-over-year change, not a reason for it — the data has no field that explains why.
                     </p>
                     <p className="mb-3 text-sm text-textMain">
-                      Overall{" "}
+                      Overall Revenue{" "}
                       {pair.totalDeltaPercent === null
                         ? "change unavailable"
                         : `${pair.totalDeltaPercent > 0 ? "up" : "down"} ${Math.abs(pair.totalDeltaPercent).toFixed(1)}%`}{" "}
                       ({formatInLakh(pair.priorTotal)} → {formatInLakh(pair.currentTotal)})
                     </p>
 
-                    <p className="mb-2 text-xs font-bold uppercase tracking-[0.15em] text-textMuted">Who drove it</p>
+                    <p className="mb-2 text-xs font-bold uppercase tracking-[0.15em] text-textMuted">Who drove it (Revenue)</p>
                     <div className="mb-3 space-y-1.5">
-                      {pair.bankBreakdown.slice(0, 5).map((b) => (
-                        <div key={b.bankName} className="flex items-center justify-between text-sm">
-                          <span className="text-textMain">
-                            Rank #{globalBankRankMap.get(b.bankName) || "—"} - {b.bankName}
-                          </span>
-                          <span className={b.deltaAbs >= 0 ? "font-semibold text-emerald-600" : "font-semibold text-rose-500"}>
-                            {b.deltaAbs >= 0 ? "+" : ""}
-                            {formatInLakh(b.deltaAbs)} ({b.contributionPercent === null ? "—" : `${b.contributionPercent.toFixed(0)}%`} of change)
-                          </span>
-                        </div>
-                      ))}
+                      {pair.bankBreakdown.slice(0, 5).map((b) => {
+                        const range = bankActiveRangeMap.get(b.bankName);
+                        return (
+                          <div key={b.bankName} className="flex items-center gap-3 text-sm">
+                            <div className="w-40 flex-shrink-0">
+                              <span className="text-textMain">
+                                Rank #{globalBankRankMap.get(b.bankName) || "—"} - {b.bankName}
+                              </span>
+                              {range ? (
+                                <p className="text-[11px] text-textMuted">
+                                  {formatIsoDate(range.start)} – {formatIsoDate(range.end)}
+                                </p>
+                              ) : null}
+                            </div>
+                            <span className={b.deltaAbs >= 0 ? "font-semibold text-emerald-600" : "font-semibold text-rose-500"}>
+                              {b.deltaAbs >= 0 ? "+" : ""}
+                              {formatInLakh(b.deltaAbs)} Revenue ({b.contributionPercent === null ? "—" : `${b.contributionPercent.toFixed(0)}%`} of revenue change)
+                            </span>
+                          </div>
+                        );
+                      })}
                     </div>
 
                     <div className="mb-3 grid grid-cols-2 gap-3">
@@ -3255,16 +3383,15 @@ export default function App() {
                 </button>
               </div>
 
-              <div className="mb-3 space-y-1 rounded-xl bg-blue-50 p-3">
-                <p className="text-sm font-semibold text-blue-900">
-                  Last Year vs Current Year:{" "}
-                  {yearInsight.hasPrior && yearInsight.totalDeltaPercent !== null
-                    ? `${formatInLakh(yearInsight.priorTotal)} → ${formatInLakh(yearInsight.currentTotal)} (${
-                        yearInsight.totalDeltaPercent >= 0 ? "▲" : "▼"
-                      } ${Math.abs(yearInsight.totalDeltaPercent).toFixed(1)}%)`
-                    : "—"}
-                </p>
-                <p className="text-sm font-semibold text-blue-900">Current Month vs Last Month: — (year view has no month granularity)</p>
+              <div className="mb-3">
+                <MetricComparisonBox
+                  title="Last Year vs Current Year"
+                  metrics={[
+                    { label: "Revenue", current: yearInsight.hasPrior ? yearInsight.currentTotal : null, format: formatInLakh, deltaPercent: yearInsight.hasPrior ? yearInsight.totalDeltaPercent : null },
+                    { label: "Admits", current: yearInsight.hasPrior ? yearInsight.currentAdmits : null, format: formatCountInLakh, deltaPercent: yearInsight.hasPrior ? yearInsight.admitsDeltaPercent : null },
+                    { label: "Transactions", current: yearInsight.hasPrior ? yearInsight.currentTransactions : null, format: formatCountInLakh, deltaPercent: yearInsight.hasPrior ? yearInsight.txnDeltaPercent : null },
+                  ]}
+                />
               </div>
 
               {yearInsight.hasPrior ? (
@@ -3278,26 +3405,36 @@ export default function App() {
                     Shows the size of the change, not a reason for it — the data has no field that explains why.
                   </p>
                   <p className="mb-3 text-sm text-textMain">
-                    Overall{" "}
+                    Overall Revenue{" "}
                     {yearInsight.totalDeltaPercent === null
                       ? "change unavailable"
                       : `${yearInsight.totalDeltaPercent > 0 ? "up" : "down"} ${Math.abs(yearInsight.totalDeltaPercent).toFixed(1)}%`}{" "}
                     ({formatInLakh(yearInsight.priorTotal)} → {formatInLakh(yearInsight.currentTotal)})
                   </p>
 
-                  <p className="mb-2 text-xs font-bold uppercase tracking-[0.15em] text-textMuted">Who drove it</p>
+                  <p className="mb-2 text-xs font-bold uppercase tracking-[0.15em] text-textMuted">Who drove it (Revenue)</p>
                   <div className="mb-3 space-y-1.5">
-                    {yearInsight.bankBreakdown.slice(0, 5).map((b) => (
-                      <div key={b.bankName} className="flex items-center justify-between text-sm">
-                        <span className="text-textMain">
-                          Rank #{globalBankRankMap.get(b.bankName) || "—"} - {b.bankName}
-                        </span>
-                        <span className={b.deltaAbs >= 0 ? "font-semibold text-emerald-600" : "font-semibold text-rose-500"}>
-                          {b.deltaAbs >= 0 ? "+" : ""}
-                          {formatInLakh(b.deltaAbs)} ({b.contributionPercent === null ? "—" : `${b.contributionPercent.toFixed(0)}%`} of change)
-                        </span>
-                      </div>
-                    ))}
+                    {yearInsight.bankBreakdown.slice(0, 5).map((b) => {
+                      const range = bankActiveRangeMap.get(b.bankName);
+                      return (
+                        <div key={b.bankName} className="flex items-center gap-3 text-sm">
+                          <div className="w-40 flex-shrink-0">
+                            <span className="text-textMain">
+                              Rank #{globalBankRankMap.get(b.bankName) || "—"} - {b.bankName}
+                            </span>
+                            {range ? (
+                              <p className="text-[11px] text-textMuted">
+                                {formatIsoDate(range.start)} – {formatIsoDate(range.end)}
+                              </p>
+                            ) : null}
+                          </div>
+                          <span className={b.deltaAbs >= 0 ? "font-semibold text-emerald-600" : "font-semibold text-rose-500"}>
+                            {b.deltaAbs >= 0 ? "+" : ""}
+                            {formatInLakh(b.deltaAbs)} Revenue ({b.contributionPercent === null ? "—" : `${b.contributionPercent.toFixed(0)}%`} of revenue change)
+                          </span>
+                        </div>
+                      );
+                    })}
                   </div>
 
                   <div className="grid grid-cols-2 gap-3">
@@ -3353,83 +3490,116 @@ export default function App() {
             </div>
           ) : null}
         </section>
+      </div>
 
-        <section className="rounded-[2rem] border border-white/60 bg-white/90 p-5 shadow-soft">
-          <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Custom Comparison</p>
-          <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Bank/UPI Group A vs Bank/UPI Group B</h2>
-          <p className="mt-1 text-sm text-textMuted">
-            Independent of the main Date/Bank/Offer filters above — each group has its own banks and date range.
-          </p>
-
-          <div className="mt-4 grid gap-4 md:grid-cols-2">
-            <div className="rounded-2xl border border-borderSoft bg-slate-50 p-4">
-              <p className="text-xs font-bold uppercase tracking-[0.18em] text-textMuted">Group A</p>
-              <div className="mt-2">
-                <MultiSelectDropdown
-                  options={banks}
-                  selected={groupABanks}
-                  onToggle={(bank) =>
-                    setGroupABanks((current) => (current.includes(bank) ? current.filter((item) => item !== bank) : [...current, bank]))
-                  }
-                  onClear={() => setGroupABanks([])}
-                  label="bank"
-                />
+      {showComparisonModal ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setShowComparisonModal(false)}>
+          <div className="max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded-[2rem] bg-white p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="mb-2 flex items-center justify-between">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Custom Comparison</p>
+                <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Bank/UPI Group A vs Bank/UPI Group B</h2>
               </div>
-              <div className="mt-3 flex items-center gap-2">
-                <input
-                  type="month"
-                  value={groupADateStart}
-                  onChange={(event) => setGroupADateStart(event.target.value)}
-                  className="w-full rounded-xl border border-borderSoft px-3 py-2 text-sm text-textMain"
-                />
-                <span className="text-xs font-bold text-textMuted">to</span>
-                <input
-                  type="month"
-                  value={groupADateEnd}
-                  onChange={(event) => setGroupADateEnd(event.target.value)}
-                  className="w-full rounded-xl border border-borderSoft px-3 py-2 text-sm text-textMain"
-                />
+              <button type="button" onClick={() => setShowComparisonModal(false)} className="text-sm font-bold text-textMuted hover:text-textMain">
+                ✕ Close
+              </button>
+            </div>
+            <p className="mt-1 text-sm text-textMuted">
+              Independent of the main Date/Bank/Offer filters above — each group has its own banks and date range.
+            </p>
+
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
+              <div className="rounded-2xl border border-borderSoft bg-slate-50 p-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-bold uppercase tracking-[0.18em] text-textMuted">Group A</p>
+                  <button
+                    type="button"
+                    onClick={() => setGroupDetailOpen("A")}
+                    className="rounded-xl bg-white px-2.5 py-1 text-right text-[11px] font-bold leading-tight text-textMuted shadow-sm hover:bg-slate-100"
+                  >
+                    BANK: {groupACardCount}
+                    <br />
+                    UPI: {groupAUpiCount}
+                  </button>
+                </div>
+                <div className="mt-2">
+                  <MultiSelectDropdown
+                    options={banks}
+                    selected={groupABanks}
+                    onToggle={(bank) =>
+                      setGroupABanks((current) => (current.includes(bank) ? current.filter((item) => item !== bank) : [...current, bank]))
+                    }
+                    onClear={() => setGroupABanks([])}
+                    label="bank"
+                  />
+                </div>
+                <div className="mt-3 flex flex-col gap-2">
+                  <MultiSelectDropdown
+                    options={fiscalYears}
+                    selected={groupAFy}
+                    onToggle={(fy) => setGroupAFy((current) => (current.includes(fy) ? current.filter((i) => i !== fy) : [...current, fy]))}
+                    onClear={() => setGroupAFy([])}
+                    label="FY"
+                  />
+                  <MultiSelectDropdown
+                    options={fiscalMonths}
+                    selected={groupAMonths}
+                    onToggle={(m) => setGroupAMonths((current) => (current.includes(m) ? current.filter((i) => i !== m) : [...current, m]))}
+                    onClear={() => setGroupAMonths([])}
+                    label="month"
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-borderSoft bg-slate-50 p-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-bold uppercase tracking-[0.18em] text-textMuted">Group B</p>
+                  <button
+                    type="button"
+                    onClick={() => setGroupDetailOpen("B")}
+                    className="rounded-xl bg-white px-2.5 py-1 text-right text-[11px] font-bold leading-tight text-textMuted shadow-sm hover:bg-slate-100"
+                  >
+                    BANK: {groupBCardCount}
+                    <br />
+                    UPI: {groupBUpiCount}
+                  </button>
+                </div>
+                <div className="mt-2">
+                  <MultiSelectDropdown
+                    options={banks}
+                    selected={groupBBanks}
+                    onToggle={(bank) =>
+                      setGroupBBanks((current) => (current.includes(bank) ? current.filter((item) => item !== bank) : [...current, bank]))
+                    }
+                    onClear={() => setGroupBBanks([])}
+                    label="bank"
+                  />
+                </div>
+                <div className="mt-3 flex flex-col gap-2">
+                  <MultiSelectDropdown
+                    options={fiscalYears}
+                    selected={groupBFy}
+                    onToggle={(fy) => setGroupBFy((current) => (current.includes(fy) ? current.filter((i) => i !== fy) : [...current, fy]))}
+                    onClear={() => setGroupBFy([])}
+                    label="FY"
+                  />
+                  <MultiSelectDropdown
+                    options={fiscalMonths}
+                    selected={groupBMonths}
+                    onToggle={(m) => setGroupBMonths((current) => (current.includes(m) ? current.filter((i) => i !== m) : [...current, m]))}
+                    onClear={() => setGroupBMonths([])}
+                    label="month"
+                  />
+                </div>
               </div>
             </div>
 
-            <div className="rounded-2xl border border-borderSoft bg-slate-50 p-4">
-              <p className="text-xs font-bold uppercase tracking-[0.18em] text-textMuted">Group B</p>
-              <div className="mt-2">
-                <MultiSelectDropdown
-                  options={banks}
-                  selected={groupBBanks}
-                  onToggle={(bank) =>
-                    setGroupBBanks((current) => (current.includes(bank) ? current.filter((item) => item !== bank) : [...current, bank]))
-                  }
-                  onClear={() => setGroupBBanks([])}
-                  label="bank"
-                />
-              </div>
-              <div className="mt-3 flex items-center gap-2">
-                <input
-                  type="month"
-                  value={groupBDateStart}
-                  onChange={(event) => setGroupBDateStart(event.target.value)}
-                  className="w-full rounded-xl border border-borderSoft px-3 py-2 text-sm text-textMain"
-                />
-                <span className="text-xs font-bold text-textMuted">to</span>
-                <input
-                  type="month"
-                  value={groupBDateEnd}
-                  onChange={(event) => setGroupBDateEnd(event.target.value)}
-                  className="w-full rounded-xl border border-borderSoft px-3 py-2 text-sm text-textMain"
-                />
-              </div>
-            </div>
-          </div>
-
-          <div className="mt-5">
-            {!groupADateStart || !groupADateEnd || !groupBDateStart || !groupBDateEnd ? (
-              <p className="text-sm text-textMuted">Select a date range for both groups to compare.</p>
-            ) : !groupARows.length || !groupBRows.length ? (
-              <p className="text-sm text-textMuted">No data for this selection.</p>
-            ) : (
-              <>
+            <div className="mt-5">
+              {!groupAFy.length || !groupAMonths.length || !groupBFy.length || !groupBMonths.length ? (
+                <p className="text-sm text-textMuted">Select FY and Month for both groups to compare.</p>
+              ) : !groupARows.length || !groupBRows.length ? (
+                <p className="text-sm text-textMuted">No data for this selection.</p>
+              ) : (
                 <div className="overflow-x-auto">
                   <table className="min-w-full text-sm">
                     <thead>
@@ -3454,10 +3624,16 @@ export default function App() {
                         <td className="py-2">{renderDeltaBadge(computeDelta(groupBKpis.totalTransactions, groupAKpis.totalTransactions))}</td>
                       </tr>
                       <tr>
-                        <td className="py-2 pr-4 font-semibold text-textMain">Discount</td>
+                        <td className="py-2 pr-4 font-semibold text-textMain">Discount Amount</td>
                         <td className="py-2 pr-4 text-textMain">{formatInLakh(groupAKpis.totalDiscount)}</td>
                         <td className="py-2 pr-4 text-textMain">{formatInLakh(groupBKpis.totalDiscount)}</td>
                         <td className="py-2">{renderDeltaBadge(computeDelta(groupBKpis.totalDiscount, groupAKpis.totalDiscount))}</td>
+                      </tr>
+                      <tr>
+                        <td className="py-2 pr-4 font-semibold text-textMain">Admits</td>
+                        <td className="py-2 pr-4 text-textMain">{formatCountInLakh(groupAAdmits)}</td>
+                        <td className="py-2 pr-4 text-textMain">{formatCountInLakh(groupBAdmits)}</td>
+                        <td className="py-2">{renderDeltaBadge(computeDelta(groupBAdmits, groupAAdmits))}</td>
                       </tr>
                       <tr>
                         <td className="py-2 pr-4 font-semibold text-textMain">Discount Rate</td>
@@ -3468,20 +3644,17 @@ export default function App() {
                     </tbody>
                   </table>
                 </div>
-
-                <p className="mt-4 text-sm text-textMain">
-                  {groupBBanks.join("/") || "Group B"} ({groupBDateStart} to {groupBDateEnd}) generated {formatInLakh(groupBKpis.grossRevenue)} vs{" "}
-                  {groupABanks.join("/") || "Group A"} ({groupADateStart} to {groupADateEnd})'s {formatInLakh(groupAKpis.grossRevenue)} —{" "}
-                  {groupRevenueDeltaPercent === null
-                    ? "no comparable prior data"
-                    : `a ${Math.abs(groupRevenueDeltaPercent).toFixed(1)}% ${groupRevenueDeltaPercent >= 0 ? "increase" : "decrease"}`}
-                  .
-                </p>
-              </>
-            )}
+              )}
+            </div>
           </div>
-        </section>
-      </div>
+        </div>
+      ) : null}
+
+      <GroupDetailModal
+        group={groupDetailOpen}
+        breakdown={groupDetailOpen === "A" ? groupABankBreakdown : groupDetailOpen === "B" ? groupBBankBreakdown : []}
+        onClose={() => setGroupDetailOpen(null)}
+      />
 
       <OfferModal offer={selectedOffer} onClose={() => setSelectedOffer(null)} />
       <BankModal
