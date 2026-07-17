@@ -208,6 +208,26 @@ function formatIsoDate(date) {
   return `${year}-${month}-${day}`;
 }
 
+function exportOffersToExcel(offersByEntity, filename) {
+  const rows = [];
+  offersByEntity.forEach((entity) => {
+    entity.offers.forEach((offer) => {
+      rows.push({
+        "Bank/Partner": entity.bankName,
+        "Offer Name": offer.offerName,
+        "Start Date": offer.startLabel,
+        "End Date": offer.endLabel,
+        "Bank/UPI Contribution (Rs.)": Math.round(offer.bankDiscount * 100) / 100,
+        "PVR Contribution (Rs.)": Math.round(offer.pvrDiscount * 100) / 100,
+      });
+    });
+  });
+  const worksheet = XLSX.utils.json_to_sheet(rows);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Offers");
+  XLSX.writeFile(workbook, filename);
+}
+
 function monthKeyFromDate(date) {
   if (!date) return "Unknown";
   const year = date.getFullYear();
@@ -2478,36 +2498,70 @@ export default function App() {
               {formatInteger(totalOfferCountByBank)} Card / {formatInteger(totalOfferCountByUpiPartner)} UPI
             </p>
           </div>
-          <button
-            type="button"
+          <div
+            role="button"
+            tabIndex={0}
             onClick={() => setShowOffersByUpi(true)}
-            className="flex h-[90px] items-center justify-between gap-2 rounded-2xl border border-white/60 bg-white/90 p-3 text-left shadow-soft"
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                setShowOffersByUpi(true);
+              }
+            }}
+            className="flex h-[90px] cursor-pointer items-center justify-between gap-2 rounded-2xl border border-white/60 bg-white/90 p-3 text-left shadow-soft"
           >
             <div className="min-w-0">
               <p className="mt-1 truncate text-sm font-bold text-textMain">UPI Partners</p>
               <p className="text-xs text-textMuted">
                 {formatInteger(totalOfferCountByUpiPartner)} offers across {formatInteger(upiOffersByPartner.length)} partners
               </p>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  exportOffersToExcel(upiOffersByPartner, "upi_partner_offers.xlsx");
+                }}
+                className="mt-1 rounded-full border border-borderSoft bg-white px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-textMuted hover:bg-slate-50"
+              >
+                ⬇ Download Excel
+              </button>
             </div>
             <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl border border-borderSoft bg-slate-50 text-sm font-bold text-textMuted">
               →
             </span>
-          </button>
-          <button
-            type="button"
+          </div>
+          <div
+            role="button"
+            tabIndex={0}
             onClick={() => setShowOffersByBank(true)}
-            className="flex h-[90px] items-center justify-between gap-2 rounded-2xl border border-white/60 bg-white/90 p-3 text-left shadow-soft"
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                setShowOffersByBank(true);
+              }
+            }}
+            className="flex h-[90px] cursor-pointer items-center justify-between gap-2 rounded-2xl border border-white/60 bg-white/90 p-3 text-left shadow-soft"
           >
             <div className="min-w-0">
               <p className="mt-1 truncate text-sm font-bold text-textMain">Bank Partners</p>
               <p className="text-xs text-textMuted">
                 {formatInteger(totalOfferCountByBank)} offers across {formatInteger(offersByBank.length)} banks
               </p>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  exportOffersToExcel(offersByBank, "bank_offers.xlsx");
+                }}
+                className="mt-1 rounded-full border border-borderSoft bg-white px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-textMuted hover:bg-slate-50"
+              >
+                ⬇ Download Excel
+              </button>
             </div>
             <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl border border-borderSoft bg-slate-50 text-sm font-bold text-textMuted">
               →
             </span>
-          </button>
+          </div>
         </div>
 
         {/* Row 4 — Key Metrics (kept at full size, most generous space) */}
