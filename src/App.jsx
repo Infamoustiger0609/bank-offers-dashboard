@@ -286,6 +286,7 @@ const SEASONAL_METRICS = [
   { key: "revenue", label: "Revenue", field: "transactionTotal" },
   { key: "transactions", label: "Transactions", field: "discountedTransactions" },
   { key: "discount", label: "Discount", field: "discountAmount" },
+  { key: "admits", label: "Admits", field: "totalTickets" },
 ];
 
 function monthRange(year, month) {
@@ -1013,7 +1014,7 @@ function StatCard({ title, value, subtitle, color, icon, delta, extra }) {
   );
 }
 
-function MultiSelectDropdown({ options, selected, onToggle, onClear, label }) {
+function MultiSelectDropdown({ options, selected, onToggle, onClear, label, showSelectedNames = false }) {
   const [open, setOpen] = useState(false);
   const panelRef = useRef(null);
   const allSelected = options.length > 0 && selected.length === options.length;
@@ -1033,12 +1034,14 @@ function MultiSelectDropdown({ options, selected, onToggle, onClear, label }) {
         onClick={() => setOpen((value) => !value)}
         className="flex w-full min-w-[220px] items-center justify-between rounded-2xl border border-borderSoft bg-white px-4 py-3 text-left text-sm font-semibold text-textMain shadow-sm"
       >
-        <span>
+        <span className="truncate">
           {selected.length === 0
             ? `No ${label}s selected`
             : allSelected
               ? `All ${label.charAt(0).toUpperCase()}${label.slice(1)}s`
-              : `${selected.length} ${label}${selected.length > 1 ? "s" : ""} selected`}
+              : showSelectedNames
+                ? selected.join(", ")
+                : `${selected.length} ${label}${selected.length > 1 ? "s" : ""} selected`}
         </span>
         <span className="text-textMuted">{open ? "▲" : "▼"}</span>
       </button>
@@ -2447,6 +2450,7 @@ export default function App() {
                 onToggle={(fy) => setFyFilter((current) => (current.includes(fy) ? current.filter((item) => item !== fy) : [...current, fy]))}
                 onClear={() => setFyFilter([])}
                 label="FY"
+                showSelectedNames
               />
               <MultiSelectDropdown
                 options={fiscalMonths}
@@ -2454,6 +2458,7 @@ export default function App() {
                 onToggle={(month) => setMonthFilter((current) => (current.includes(month) ? current.filter((item) => item !== month) : [...current, month]))}
                 onClear={() => setMonthFilter([])}
                 label="month"
+                showSelectedNames
               />
               <MultiSelectDropdown
                 options={banks}
@@ -3059,6 +3064,9 @@ export default function App() {
               >
                 View Details ▸
               </button>
+              <div className="rounded-full border border-borderSoft bg-white px-3 py-1.5 text-xs font-bold text-textMuted shadow-sm">
+                {formatInteger(totalOfferCountByBank)} Bank / {formatInteger(totalOfferCountByUpiPartner)} UPI offers
+              </div>
               {trendMode === "mom" ? (
                 <div className="inline-flex rounded-full border border-borderSoft bg-white p-1 shadow-sm">
                   {SEASONAL_METRICS.map((metric) => (
@@ -3122,16 +3130,23 @@ export default function App() {
                     <XAxis dataKey="monthLabel" stroke="#718096" />
                     <YAxis
                       stroke="#718096"
-                      tickFormatter={seasonalMetric === "transactions" ? formatCountInLakh : formatInLakh}
+                      tickFormatter={seasonalMetric === "transactions" || seasonalMetric === "admits" ? formatCountInLakh : formatInLakh}
                       label={{
-                        value: seasonalMetric === "revenue" ? "Revenue (₹ L)" : seasonalMetric === "transactions" ? "Transactions" : "Discount (₹ L)",
+                        value:
+                          seasonalMetric === "revenue"
+                            ? "Revenue (₹ L)"
+                            : seasonalMetric === "transactions"
+                              ? "Transactions"
+                              : seasonalMetric === "admits"
+                                ? "Admits"
+                                : "Discount (₹ L)",
                         angle: -90,
                         position: "insideLeft",
                       }}
                     />
                     <Tooltip
                       allowEscapeViewBox={{ x: false, y: true }}
-                      content={<MonthlyTrendTooltip formatValue={seasonalMetric === "transactions" ? formatCountInLakh : formatInLakh} />}
+                      content={<MonthlyTrendTooltip formatValue={seasonalMetric === "transactions" || seasonalMetric === "admits" ? formatCountInLakh : formatInLakh} />}
                     />
                     <Legend />
                     {seasonalYears.map((year, index) => (
@@ -3594,6 +3609,7 @@ export default function App() {
                     onToggle={(fy) => setGroupAFy((current) => (current.includes(fy) ? current.filter((i) => i !== fy) : [...current, fy]))}
                     onClear={() => setGroupAFy([])}
                     label="FY"
+                    showSelectedNames
                   />
                   <MultiSelectDropdown
                     options={fiscalMonths}
@@ -3601,6 +3617,7 @@ export default function App() {
                     onToggle={(m) => setGroupAMonths((current) => (current.includes(m) ? current.filter((i) => i !== m) : [...current, m]))}
                     onClear={() => setGroupAMonths([])}
                     label="month"
+                    showSelectedNames
                   />
                 </div>
               </div>
@@ -3636,6 +3653,7 @@ export default function App() {
                     onToggle={(fy) => setGroupBFy((current) => (current.includes(fy) ? current.filter((i) => i !== fy) : [...current, fy]))}
                     onClear={() => setGroupBFy([])}
                     label="FY"
+                    showSelectedNames
                   />
                   <MultiSelectDropdown
                     options={fiscalMonths}
@@ -3643,6 +3661,7 @@ export default function App() {
                     onToggle={(m) => setGroupBMonths((current) => (current.includes(m) ? current.filter((i) => i !== m) : [...current, m]))}
                     onClear={() => setGroupBMonths([])}
                     label="month"
+                    showSelectedNames
                   />
                 </div>
               </div>
