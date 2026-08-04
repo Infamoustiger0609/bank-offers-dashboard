@@ -106,6 +106,7 @@ const EMPTY_KPIS = {
   recoveryRate: 0,
   ticketRevenue: 0,
   totalTickets: 0,
+  fnbRevenue: 0,
 };
 
 function normalizeKey(value) {
@@ -287,6 +288,7 @@ const SEASONAL_METRICS = [
   { key: "transactions", label: "Transactions", field: "discountedTransactions" },
   { key: "discount", label: "Discount", field: "discountAmount" },
   { key: "admits", label: "Admits", field: "totalTickets" },
+  { key: "offers", label: "Offers", field: null },
 ];
 
 function monthRange(year, month) {
@@ -743,6 +745,7 @@ function computeKpis(rows) {
       acc.totalDiscount += row.discountAmount;
       acc.ticketRevenue += row.ticketRevenue;
       acc.totalTickets += row.totalTickets || 0;
+      acc.fnbRevenue += row.fnbRevenue || 0;
       return acc;
     },
     { ...EMPTY_KPIS },
@@ -797,6 +800,16 @@ function aggregateBanks(rows) {
     grouped.set(row.bankName, current);
   });
   return [...grouped.values()].sort((a, b) => b.totalRevenue - a.totalRevenue);
+}
+
+function classifyCardType(rawOfferName) {
+  const name = rawOfferName.toLowerCase();
+  const hasCredit = /credit/.test(name);
+  const hasDebit = /debit/.test(name);
+  if (hasCredit && hasDebit) return "both";
+  if (hasCredit) return "credit";
+  if (hasDebit) return "debit";
+  return "unspecified";
 }
 
 function normalizeOfferChannel(offerName) {
@@ -929,16 +942,29 @@ function aggregateMonthlySeries(rows, selectedBanks) {
 }
 
 function aggregateSeasonalByYear(rows, selectedBanks, metric = "revenue") {
+  const isOfferCount = metric === "offers";
   const field = SEASONAL_METRICS.find((entry) => entry.key === metric)?.field || "transactionTotal";
   const seasonMap = new Map();
+  const offerSetMap = new Map();
+
   rows.forEach((row) => {
     if (!selectedBanks.includes(row.bankName)) return;
     if (row.monthKey === "Unknown" || !row.fiscalYear) return;
     const [month] = row.monthKey.split("-").map(Number);
     if (!seasonMap.has(month)) seasonMap.set(month, { month, monthLabel: MONTH_NAMES[month - 1] });
     const current = seasonMap.get(month);
-    current[row.fiscalYear] = (current[row.fiscalYear] || 0) + row[field];
+
+    if (isOfferCount) {
+      const canonicalName = OFFER_ALIAS_MAP[row.offerName] || normalizeOfferChannel(row.offerName);
+      const setKey = `${month}::${row.fiscalYear}`;
+      if (!offerSetMap.has(setKey)) offerSetMap.set(setKey, new Set());
+      offerSetMap.get(setKey).add(`${row.bankName}::${canonicalName}`);
+      current[row.fiscalYear] = offerSetMap.get(setKey).size;
+    } else {
+      current[row.fiscalYear] = (current[row.fiscalYear] || 0) + row[field];
+    }
   });
+
   return [...seasonMap.values()].sort((a, b) => {
     const fiscalIndex = (m) => (m >= 4 ? m - 4 : m + 8);
     return fiscalIndex(a.month) - fiscalIndex(b.month);
@@ -1697,6 +1723,28 @@ export default function App() {
   const cardRows = useMemo(() => filteredRows.filter((r) => r.paymentCategory === "Card"), [filteredRows]);
   const upiRows = useMemo(() => filteredRows.filter((r) => r.paymentCategory === "UPI"), [filteredRows]);
 
+  const cardOfferTypeBreakdown = useMemo(() => {
+    const grouped = new Map();
+    cardRows.forEach((row) => {
+      const canonicalName = OFFER_ALIAS_MAP[row.offerName] || normalizeOfferChannel(row.offerName);
+      const key = `${row.bankName}::${canonicalName}`;
+      const type = classifyCardType(row.offerName);
+      if (!grouped.has(key)) grouped.set(key, new Set());
+      grouped.get(key).add(type);
+    });
+    let credit = 0,
+      debit = 0,
+      both = 0,
+      unspecified = 0;
+    grouped.forEach((typeSet) => {
+      if (typeSet.has("credit") && typeSet.has("debit")) both += 1;
+      else if (typeSet.has("credit")) credit += 1;
+      else if (typeSet.has("debit")) debit += 1;
+      else unspecified += 1;
+    });
+    return { credit, debit, both, unspecified };
+  }, [cardRows]);
+
   const activeBanks = useMemo(() => [...new Set(filteredRows.map((r) => r.bankName))], [filteredRows]);
   const activeCardBanks = useMemo(() => activeBanks.filter((b) => cardRows.some((r) => r.bankName === b)), [activeBanks, cardRows]);
   const activeUpiPartners = useMemo(() => activeBanks.filter((b) => upiRows.some((r) => r.bankName === b)), [activeBanks, upiRows]);
@@ -1729,7 +1777,15 @@ export default function App() {
     [atpAvtKpis],
   );
 
-  console.log("[ATP DEBUG]", { paymentCategoryFilter, atpAvtSourceRowsLength: atpAvtSourceRows.length, atp, avt });
+  const sph = useMemo(() => (atpAvtKpis.totalTickets ? atpAvtKpis.fnbRevenue / atpAvtKpis.totalTickets : null), [atpAvtKpis]);
+  const ticketFnbSplit = useMemo(() => {
+    const total = atpAvtKpis.ticketRevenue + atpAvtKpis.fnbRevenue;
+    if (!total) return null;
+    return {
+      ticketPercent: (atpAvtKpis.ticketRevenue / total) * 100,
+      fnbPercent: (atpAvtKpis.fnbRevenue / total) * 100,
+    };
+  }, [atpAvtKpis]);
 
   const universalATP = useMemo(() => {
     const activeMonths = [...new Set(filteredRows.map((r) => r.monthKey).filter((k) => k !== "Unknown"))];
@@ -1747,8 +1803,22 @@ export default function App() {
     return universalTxns ? totalRev / universalTxns : null;
   }, [filteredRows, universalTotalRevenueData, universalData]);
 
+  const universalSPH = useMemo(() => {
+    const activeMonths = [...new Set(filteredRows.map((r) => r.monthKey).filter((k) => k !== "Unknown"))];
+    const validMonths = activeMonths.filter(
+      (key) => universalTotalRevenueData.map.has(key) && universalTicketRevenueData.map.has(key) && admitsData.map.has(key),
+    );
+    const totalFnbRevenue = validMonths.reduce(
+      (sum, key) => sum + (universalTotalRevenueData.map.get(key) - universalTicketRevenueData.map.get(key)),
+      0,
+    );
+    const admits = validMonths.reduce((sum, key) => sum + admitsData.map.get(key), 0);
+    return admits ? totalFnbRevenue / admits : null;
+  }, [filteredRows, universalTotalRevenueData, universalTicketRevenueData, admitsData]);
+
   const avtComparison = useMemo(() => computeUpliftOrContribution(avt, universalAVT), [avt, universalAVT]);
   const atpComparison = useMemo(() => computeUpliftOrContribution(atp, universalATP), [atp, universalATP]);
+  const sphComparison = useMemo(() => computeUpliftOrContribution(sph, universalSPH), [sph, universalSPH]);
   const admitsComparison = useMemo(
     () => computeUpliftOrContribution(bankAdmits, activeAdmitsTotal),
     [bankAdmits, activeAdmitsTotal],
@@ -1793,6 +1863,7 @@ export default function App() {
     const priorAtpAvtKpis = computeKpis(priorAtpAvtRows);
     const atpFrom = (k) => (k.totalTickets ? k.grossRevenue / k.totalTickets : null);
     const avtFrom = (k) => (k.totalTransactions ? k.grossRevenue / k.totalTransactions : null);
+    const sphFrom = (k) => (k.totalTickets ? k.fnbRevenue / k.totalTickets : null);
     const bankAdmitsFrom = (rowsList) => rowsList.reduce((sum, r) => sum + (r.totalTickets || 0), 0);
 
     return {
@@ -1801,6 +1872,7 @@ export default function App() {
         recoveryRate: current.grossRevenue ? (current.netRevenue / current.grossRevenue) * 100 : 0,
         atp: atpFrom(currentAtpAvtKpis),
         avt: avtFrom(currentAtpAvtKpis),
+        sph: sphFrom(currentAtpAvtKpis),
         bankAdmits: bankAdmitsFrom(currentRows),
       },
       prior: {
@@ -1808,6 +1880,7 @@ export default function App() {
         recoveryRate: prior.grossRevenue ? (prior.netRevenue / prior.grossRevenue) * 100 : 0,
         atp: atpFrom(priorAtpAvtKpis),
         avt: avtFrom(priorAtpAvtKpis),
+        sph: sphFrom(priorAtpAvtKpis),
         bankAdmits: bankAdmitsFrom(priorRows),
       },
     };
@@ -2496,11 +2569,24 @@ export default function App() {
               {formatInteger(activeCardBanks.length)} / {formatInteger(activeUpiPartners.length)}
             </p>
           </div>
-          <div className="flex h-[90px] flex-col justify-center rounded-2xl border border-white/60 bg-white/90 p-3 shadow-soft">
-            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500">Total Offers</p>
-            <p className="mt-1 text-2xl font-extrabold text-textMain">{formatInteger(totalOfferCount)}</p>
-            <p className="text-xs text-textMuted">
-              {formatInteger(totalOfferCountByBank)} Card / {formatInteger(totalOfferCountByUpiPartner)} UPI
+          <div className="flex h-[90px] flex-col justify-start rounded-2xl border border-white/60 bg-white/90 p-3 shadow-soft">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500">Total Offers</p>
+                <p className="mt-0.5 text-2xl font-extrabold leading-none text-textMain">{formatInteger(totalOfferCount)}</p>
+              </div>
+              <p className="flex-shrink-0 text-right text-[10px] font-semibold leading-tight text-textMuted">
+                BMS: 96
+                <br />
+                District: 30 (Jul)
+              </p>
+            </div>
+            <p className="mt-1 truncate text-[11px] leading-snug text-textMuted">
+              {cardOfferTypeBreakdown.credit} CC / {cardOfferTypeBreakdown.debit} DC
+              {cardOfferTypeBreakdown.both ? ` / ${cardOfferTypeBreakdown.both} Both` : ""}
+              {cardOfferTypeBreakdown.unspecified ? ` / ${cardOfferTypeBreakdown.unspecified} Other` : ""}
+              {" · "}
+              {formatInteger(totalOfferCountByUpiPartner)} UPI
             </p>
           </div>
           <div
@@ -2591,7 +2677,7 @@ export default function App() {
               <p className="text-xs text-textMuted">Current vs previous</p>
             </div>
           </div>
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
             <StatCard
               title="Total Transactions"
               value={formatCountInLakh(kpis.totalTransactions)}
@@ -2671,6 +2757,34 @@ export default function App() {
               color={KPI_COLORS[0]}
               icon="AD"
               delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.bankAdmits, comparisonKpis.prior.bankAdmits), label: COMPARISON_LABELS[comparisonMode] } : undefined}
+            />
+            <StatCard
+              title="SPH"
+              value={sph !== null ? formatRupee(sph) : "—"}
+              subtitle={
+                universalSPH !== null ? (
+                  <>
+                    {atpAvtSourceLabel}: {formatRupee(sph)}
+                    <br />
+                    Universal: {formatRupee(universalSPH)}
+                  </>
+                ) : (
+                  "F&B revenue per admit"
+                )
+              }
+              color={KPI_COLORS[0]}
+              icon="SP"
+              delta={comparisonKpis ? { value: computeDelta(comparisonKpis.current.sph, comparisonKpis.prior.sph), label: COMPARISON_LABELS[comparisonMode] } : undefined}
+              extra={
+                <>
+                  {ticketFnbSplit ? (
+                    <p className="text-xs text-textMuted">
+                      Revenue split — Tickets {ticketFnbSplit.ticketPercent.toFixed(0)}% · F&B {ticketFnbSplit.fnbPercent.toFixed(0)}%
+                    </p>
+                  ) : null}
+                  <UpliftOrContributionLine comparison={sphComparison} />
+                </>
+              }
             />
           </div>
         </section>
@@ -3130,7 +3244,13 @@ export default function App() {
                     <XAxis dataKey="monthLabel" stroke="#718096" />
                     <YAxis
                       stroke="#718096"
-                      tickFormatter={seasonalMetric === "transactions" || seasonalMetric === "admits" ? formatCountInLakh : formatInLakh}
+                      tickFormatter={
+                        seasonalMetric === "offers"
+                          ? formatInteger
+                          : seasonalMetric === "transactions" || seasonalMetric === "admits"
+                            ? formatCountInLakh
+                            : formatInLakh
+                      }
                       label={{
                         value:
                           seasonalMetric === "revenue"
@@ -3139,14 +3259,26 @@ export default function App() {
                               ? "Transactions"
                               : seasonalMetric === "admits"
                                 ? "Admits"
-                                : "Discount (₹ L)",
+                                : seasonalMetric === "offers"
+                                  ? "Offers"
+                                  : "Discount (₹ L)",
                         angle: -90,
                         position: "insideLeft",
                       }}
                     />
                     <Tooltip
                       allowEscapeViewBox={{ x: false, y: true }}
-                      content={<MonthlyTrendTooltip formatValue={seasonalMetric === "transactions" || seasonalMetric === "admits" ? formatCountInLakh : formatInLakh} />}
+                      content={
+                        <MonthlyTrendTooltip
+                          formatValue={
+                            seasonalMetric === "offers"
+                              ? formatInteger
+                              : seasonalMetric === "transactions" || seasonalMetric === "admits"
+                                ? formatCountInLakh
+                                : formatInLakh
+                          }
+                        />
+                      }
                     />
                     <Legend />
                     {seasonalYears.map((year, index) => (
