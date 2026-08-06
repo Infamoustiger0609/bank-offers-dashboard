@@ -1823,15 +1823,14 @@ export default function App() {
     });
     let credit = 0,
       debit = 0,
-      both = 0,
-      unspecified = 0;
+      both = 0;
     grouped.forEach((typeSet) => {
       if (typeSet.has("credit") && typeSet.has("debit")) both += 1;
       else if (typeSet.has("credit")) credit += 1;
       else if (typeSet.has("debit")) debit += 1;
-      else unspecified += 1;
+      else both += 1;
     });
-    return { credit, debit, both, unspecified };
+    return { credit, debit, both };
   }, [cardRows]);
 
   const activeBanks = useMemo(() => [...new Set(filteredRows.map((r) => r.bankName))], [filteredRows]);
@@ -2707,13 +2706,12 @@ export default function App() {
               <p className="flex-shrink-0 text-right text-[10px] font-semibold leading-tight text-textMuted">
                 BMS: 96
                 <br />
-                District: 30 (Jul)
+                District: 30 <br />(Jul)
               </p>
             </div>
             <p className="mt-1 truncate text-[11px] leading-snug text-textMuted">
               {cardOfferTypeBreakdown.credit} CC / {cardOfferTypeBreakdown.debit} DC
               {cardOfferTypeBreakdown.both ? ` / ${cardOfferTypeBreakdown.both} Both` : ""}
-              {cardOfferTypeBreakdown.unspecified ? ` / ${cardOfferTypeBreakdown.unspecified} Other` : ""}
               {" · "}
               {formatInteger(totalOfferCountByUpiPartner)} UPI
             </p>
