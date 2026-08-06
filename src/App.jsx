@@ -291,6 +291,15 @@ const SEASONAL_METRICS = [
   { key: "offers", label: "Offers", field: null },
 ];
 
+const YOY_METRICS = SEASONAL_METRICS.filter((entry) => entry.key === "revenue" || entry.key === "transactions" || entry.key === "admits");
+
+function pickUniversalMap(metricKey, maps) {
+  if (metricKey === "revenue") return maps.revenue;
+  if (metricKey === "transactions") return maps.transactions;
+  if (metricKey === "admits") return maps.admits;
+  return null;
+}
+
 function monthRange(year, month) {
   return { start: new Date(year, month, 1), end: new Date(year, month + 1, 0, 23, 59, 59, 999) };
 }
@@ -507,6 +516,8 @@ function buildAggregateAdjacentMonthInsight(banks, monthKey, allRows, admitsMap)
     currentAdmits,
     priorAdmits,
     admitsDeltaPercent,
+    currentBankNames: [...new Set(currentRows.map((r) => r.bankName))],
+    priorBankNames: [...new Set(priorRows.map((r) => r.bankName))],
   };
 }
 
@@ -971,16 +982,52 @@ function aggregateSeasonalByYear(rows, selectedBanks, metric = "revenue") {
   });
 }
 
+function universalSeasonalKey(fiscalYear) {
+  return `universal_${fiscalYear}`;
+}
+
+function attachUniversalToSeasonalPoints(seasonalPoints, fiscalYearsInView, universalMonthMap) {
+  if (!universalMonthMap) return seasonalPoints;
+  return seasonalPoints.map((point) => {
+    const augmented = { ...point };
+    fiscalYearsInView.forEach((fy) => {
+      const calYear = calendarYearForFiscalMonth(fy, point.month);
+      const monthKey = `${String(point.month).padStart(2, "0")}-${calYear}`;
+      augmented[universalSeasonalKey(fy)] = universalMonthMap.has(monthKey) ? universalMonthMap.get(monthKey) : null;
+    });
+    return augmented;
+  });
+}
+
 function aggregateYearlyTotals(rows, selectedBanks) {
   const yearMap = new Map();
   rows.forEach((row) => {
     if (!selectedBanks.includes(row.bankName)) return;
     if (!row.fiscalYear || row.fiscalYear === "Unknown") return;
-    yearMap.set(row.fiscalYear, (yearMap.get(row.fiscalYear) || 0) + row.transactionTotal);
+    const current = yearMap.get(row.fiscalYear) || { year: row.fiscalYear, revenue: 0, totalTransactions: 0, admits: 0 };
+    current.revenue += row.transactionTotal;
+    current.totalTransactions += row.discountedTransactions;
+    current.admits += row.totalTickets || 0;
+    yearMap.set(row.fiscalYear, current);
   });
-  return [...yearMap.entries()]
-    .map(([year, revenue]) => ({ year, revenue }))
-    .sort((a, b) => Number(a.year.split("-")[0]) - Number(b.year.split("-")[0]));
+  return [...yearMap.values()].sort((a, b) => Number(a.year.split("-")[0]) - Number(b.year.split("-")[0]));
+}
+
+function attachUniversalToYearlyPoints(yearlyPoints, universalMonthMap) {
+  if (!universalMonthMap) return yearlyPoints;
+  return yearlyPoints.map((point) => {
+    let sum = 0;
+    let found = false;
+    for (let m = 1; m <= 12; m++) {
+      const calYear = calendarYearForFiscalMonth(point.year, m);
+      const monthKey = `${String(m).padStart(2, "0")}-${calYear}`;
+      if (universalMonthMap.has(monthKey)) {
+        sum += universalMonthMap.get(monthKey);
+        found = true;
+      }
+    }
+    return { ...point, universalValue: found ? sum : null };
+  });
 }
 
 function safeRatio(numerator, denominator) {
@@ -1459,13 +1506,53 @@ function MetricRow({ label, current, format, deltaPercent }) {
   );
 }
 
-function MetricComparisonBox({ title, metrics }) {
+function MetricComparisonBox({ title, metrics, bankInfo }) {
+  const [expanded, setExpanded] = useState(false);
+
+  let commonBanks = [];
+  let newBanks = [];
+  let droppedBanks = [];
+  if (bankInfo) {
+    const currentSet = new Set(bankInfo.currentBanks);
+    const priorSet = new Set(bankInfo.priorBanks);
+    commonBanks = bankInfo.currentBanks.filter((bank) => priorSet.has(bank));
+    newBanks = bankInfo.currentBanks.filter((bank) => !priorSet.has(bank));
+    droppedBanks = bankInfo.priorBanks.filter((bank) => !currentSet.has(bank));
+  }
+
   return (
     <div className="flex-1 rounded-xl border border-borderSoft bg-white p-3">
-      <p className="mb-1 text-xs font-bold uppercase tracking-[0.15em] text-textMuted">{title}</p>
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <p className="text-xs font-bold uppercase tracking-[0.15em] text-textMuted">{title}</p>
+        {bankInfo ? (
+          <button
+            type="button"
+            onClick={() => setExpanded((value) => !value)}
+            className="flex-shrink-0 rounded-full border border-borderSoft bg-slate-50 px-2 py-0.5 text-[10px] font-bold text-textMuted hover:bg-slate-100"
+          >
+            {bankInfo.currentBanks.length} banks
+          </button>
+        ) : null}
+      </div>
       {metrics.map((m) => (
         <MetricRow key={m.label} {...m} />
       ))}
+      {bankInfo && expanded ? (
+        <div className="mt-2 space-y-2 border-t border-borderSoft/60 pt-2">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[0.15em] text-textMuted">Present in both</p>
+            <div className="mt-1 max-h-32 overflow-y-auto text-xs text-textMain">{commonBanks.length ? commonBanks.join(", ") : "—"}</div>
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[0.15em] text-textMuted">New this period</p>
+            <div className="mt-1 max-h-32 overflow-y-auto text-xs text-emerald-600">{newBanks.length ? newBanks.join(", ") : "—"}</div>
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[0.15em] text-textMuted">Dropped from prior period</p>
+            <div className="mt-1 max-h-32 overflow-y-auto text-xs text-rose-500">{droppedBanks.length ? droppedBanks.join(", ") : "—"}</div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1496,6 +1583,8 @@ export default function App() {
   const [comparisonMode, setComparisonMode] = useState("none");
   const [trendMode, setTrendMode] = useState("monthly");
   const [seasonalMetric, setSeasonalMetric] = useState("revenue");
+  const [yoyMetric, setYoyMetric] = useState("revenue");
+  const [showUniversal, setShowUniversal] = useState(false);
   const [selectedSeasonalPoint, setSelectedSeasonalPoint] = useState(null);
   const [selectedMonthlyPoint, setSelectedMonthlyPoint] = useState(null);
   const [selectedYearPoint, setSelectedYearPoint] = useState(null);
@@ -2052,6 +2141,46 @@ export default function App() {
     () => aggregateYearlyTotals(categoryDateOfferScopedRows, bankFilter),
     [categoryDateOfferScopedRows, bankFilter],
   );
+
+  const universalRevenueByMonth = useMemo(
+    () => getMonthlyReferenceValue(categoryDateOfferScopedRows, "universalTotalRevenue"),
+    [categoryDateOfferScopedRows],
+  );
+  const universalTransactionsByMonth = useMemo(
+    () => getMonthlyReferenceValue(categoryDateOfferScopedRows, "universalTransactions"),
+    [categoryDateOfferScopedRows],
+  );
+  const universalAdmitsByMonth = useMemo(
+    () => getMonthlyReferenceValue(categoryDateOfferScopedRows, "admits"),
+    [categoryDateOfferScopedRows],
+  );
+
+  const seasonalDataWithUniversal = useMemo(() => {
+    if (!showUniversal) return seasonalData;
+    const universalMap = pickUniversalMap(seasonalMetric, {
+      revenue: universalRevenueByMonth.map,
+      transactions: universalTransactionsByMonth.map,
+      admits: universalAdmitsByMonth.map,
+    });
+    if (!universalMap) return seasonalData;
+    return attachUniversalToSeasonalPoints(seasonalData, seasonalYears, universalMap);
+  }, [seasonalData, seasonalYears, showUniversal, seasonalMetric, universalRevenueByMonth, universalTransactionsByMonth, universalAdmitsByMonth]);
+
+  const yearlyDataWithUniversal = useMemo(() => {
+    if (!showUniversal) return yearlyData;
+    const universalMap = pickUniversalMap(yoyMetric, {
+      revenue: universalRevenueByMonth.map,
+      transactions: universalTransactionsByMonth.map,
+      admits: universalAdmitsByMonth.map,
+    });
+    if (!universalMap) return yearlyData;
+    return attachUniversalToYearlyPoints(yearlyData, universalMap);
+  }, [yearlyData, showUniversal, yoyMetric, universalRevenueByMonth, universalTransactionsByMonth, universalAdmitsByMonth]);
+
+  const yoyDataKey = yoyMetric === "revenue" ? "revenue" : yoyMetric === "transactions" ? "totalTransactions" : "admits";
+  const yoyName = yoyMetric === "revenue" ? "Revenue" : yoyMetric === "transactions" ? "Transactions" : "Admits";
+  const yoyFormatValue = yoyMetric === "revenue" ? formatInLakh : formatCountInLakh;
+
   const discountData = useMemo(() => {
     const grouped = new Map();
 
@@ -3197,6 +3326,34 @@ export default function App() {
                   ))}
                 </div>
               ) : null}
+              {trendMode === "yoy" ? (
+                <div className="inline-flex rounded-full border border-borderSoft bg-white p-1 shadow-sm">
+                  {YOY_METRICS.map((metric) => (
+                    <button
+                      key={metric.key}
+                      type="button"
+                      onClick={() => setYoyMetric(metric.key)}
+                      className={`rounded-full px-3 py-1.5 text-xs font-bold uppercase tracking-wide transition ${
+                        yoyMetric === metric.key ? "bg-accentBlue text-white" : "text-textMuted hover:bg-slate-50"
+                      }`}
+                    >
+                      {metric.label}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {trendMode === "mom" || trendMode === "yoy" ? (
+                <button
+                  type="button"
+                  onClick={() => setShowUniversal((value) => !value)}
+                  title="Toggle universal (cinema-wide) background line"
+                  className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-[10px] font-extrabold uppercase tracking-wide transition ${
+                    showUniversal ? "bg-accentBlue text-white" : "border border-borderSoft bg-white text-textMuted"
+                  }`}
+                >
+                  UNI
+                </button>
+              ) : null}
             </div>
           </div>
           <div className="mt-4 h-[320px] overflow-hidden rounded-3xl border border-borderSoft bg-white">
@@ -3239,9 +3396,12 @@ export default function App() {
             ) : trendMode === "mom" ? (
               seasonalData.length && bankFilter.length ? (
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={seasonalData} margin={{ top: 10, right: 20, left: 10, bottom: 10 }}>
+                  <LineChart data={seasonalDataWithUniversal} margin={{ top: 10, right: 20, left: 10, bottom: 10 }}>
                     <CartesianGrid stroke="#e2e8f0" strokeDasharray="4 4" />
                     <XAxis dataKey="monthLabel" stroke="#718096" />
+                    {showUniversal && (seasonalMetric === "revenue" || seasonalMetric === "transactions" || seasonalMetric === "admits") ? (
+                      <YAxis yAxisId="universal" hide domain={["auto", "auto"]} />
+                    ) : null}
                     <YAxis
                       stroke="#718096"
                       tickFormatter={
@@ -3297,6 +3457,22 @@ export default function App() {
                         connectNulls
                       />
                     ))}
+                    {showUniversal && (seasonalMetric === "revenue" || seasonalMetric === "transactions" || seasonalMetric === "admits")
+                      ? seasonalYears.map((year, index) => (
+                          <Line
+                            key={`universal-${year}`}
+                            yAxisId="universal"
+                            type="monotone"
+                            dataKey={universalSeasonalKey(year)}
+                            stroke={BANK_COLORS[index % BANK_COLORS.length]}
+                            strokeWidth={2}
+                            strokeDasharray="5 5"
+                            dot={false}
+                            activeDot={false}
+                            name={`Universal ${year}`}
+                          />
+                        ))
+                      : null}
                   </LineChart>
                 </ResponsiveContainer>
               ) : (
@@ -3306,23 +3482,37 @@ export default function App() {
               )
             ) : yearlyData.length && bankFilter.length ? (
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={yearlyData} margin={{ top: 24, right: 20, left: 0, bottom: 10 }}>
+                <BarChart data={yearlyDataWithUniversal} margin={{ top: 24, right: 20, left: 0, bottom: 10 }}>
                   <CartesianGrid stroke="#e2e8f0" strokeDasharray="4 4" />
                   <XAxis dataKey="year" stroke="#718096" />
-                  <YAxis stroke="#718096" tickFormatter={formatInLakh} />
-                  <Tooltip formatter={(value) => formatInLakh(value)} contentStyle={{ borderRadius: "18px", borderColor: "#e2e8f0" }} />
+                  <YAxis stroke="#718096" tickFormatter={yoyFormatValue} />
+                  {showUniversal ? <YAxis yAxisId="universal" hide domain={["auto", "auto"]} /> : null}
+                  <Tooltip content={<MonthlyTrendTooltip formatValue={yoyFormatValue} />} />
                   <Legend />
                   <Bar
-                    dataKey="revenue"
-                    name="Revenue"
+                    dataKey={yoyDataKey}
+                    name={yoyName}
                     fill="#2563eb"
                     radius={[8, 8, 0, 0]}
                     cursor="pointer"
                     activeBar={{ fill: "#1d4ed8" }}
                     onClick={(data) => setSelectedYearPoint({ year: data.year })}
                   >
-                    <LabelList dataKey="revenue" position="top" formatter={(value) => formatInLakh(value)} style={{ fontSize: 12, fontWeight: 700, fill: "#1a202c" }} />
+                    <LabelList dataKey={yoyDataKey} position="top" formatter={(value) => yoyFormatValue(value)} style={{ fontSize: 12, fontWeight: 700, fill: "#1a202c" }} />
                   </Bar>
+                  {showUniversal ? (
+                    <Line
+                      yAxisId="universal"
+                      type="monotone"
+                      dataKey="universalValue"
+                      stroke="#cbd5e1"
+                      strokeWidth={2}
+                      strokeDasharray="5 5"
+                      dot={false}
+                      activeDot={false}
+                      name="Universal (cinema-wide)"
+                    />
+                  ) : null}
                 </BarChart>
               </ResponsiveContainer>
             ) : (
@@ -3356,6 +3546,16 @@ export default function App() {
                     { label: "Admits", current: momAdjacentMonthInsight?.currentAdmits, format: formatCountInLakh, deltaPercent: momAdjacentMonthInsight?.admitsDeltaPercent ?? null },
                     { label: "Transactions", current: momAdjacentMonthInsight?.currentTransactions, format: formatCountInLakh, deltaPercent: momAdjacentMonthInsight?.txnDeltaPercent ?? null },
                   ]}
+                  bankInfo={
+                    momAdjacentMonthInsight
+                      ? {
+                          currentBanks: momAdjacentMonthInsight.currentBankNames,
+                          priorBanks: momAdjacentMonthInsight.priorBankNames,
+                          currentLabel: "This month",
+                          priorLabel: "Prior month",
+                        }
+                      : null
+                  }
                 />
                 <MetricComparisonBox
                   title="Last Year vs Current"
@@ -3374,6 +3574,19 @@ export default function App() {
                           { label: "Admits", current: null, format: formatCountInLakh, deltaPercent: null },
                           { label: "Transactions", current: null, format: formatCountInLakh, deltaPercent: null },
                         ]
+                  }
+                  bankInfo={
+                    inferencePairs.length
+                      ? (() => {
+                          const latest = inferencePairs[inferencePairs.length - 1];
+                          return {
+                            currentBanks: latest.bankBreakdown.filter((b) => b.currentRevenue).map((b) => b.bankName),
+                            priorBanks: latest.bankBreakdown.filter((b) => b.priorRevenue).map((b) => b.bankName),
+                            currentLabel: latest.currentYear,
+                            priorLabel: latest.priorYear,
+                          };
+                        })()
+                      : null
                   }
                 />
               </div>
@@ -3403,28 +3616,39 @@ export default function App() {
                     </p>
 
                     <p className="mb-2 text-xs font-bold uppercase tracking-[0.15em] text-textMuted">Who drove it (Revenue)</p>
-                    <div className="mb-3 space-y-1.5">
-                      {pair.bankBreakdown.slice(0, 5).map((b) => {
-                        const range = bankActiveRangeMap.get(b.bankName);
-                        return (
-                          <div key={b.bankName} className="flex items-center gap-3 text-sm">
-                            <div className="w-40 flex-shrink-0">
-                              <span className="text-textMain">
-                                Rank #{globalBankRankMap.get(b.bankName) || "—"} - {b.bankName}
+                    <div className="mb-3">
+                      {pair.bankBreakdown.slice(0, 5).some((b) => b.contributionPercent !== null && Math.abs(b.contributionPercent) > 100) ? (
+                        <p className="mb-2 text-xs italic text-textMuted">
+                          Some banks show contribution over 100% because gains and losses across banks partly offset each other — the net change
+                          is smaller than individual bank swings.
+                        </p>
+                      ) : null}
+                      <div className="space-y-1.5">
+                        {pair.bankBreakdown.slice(0, 5).map((b) => {
+                          const range = bankActiveRangeMap.get(b.bankName);
+                          return (
+                            <div key={b.bankName} className="flex items-center gap-3 text-sm">
+                              <div className="w-40 flex-shrink-0">
+                                <span className="text-textMain">
+                                  Rank #{globalBankRankMap.get(b.bankName) || "—"} - {b.bankName}
+                                </span>
+                                {range ? (
+                                  <p className="text-[11px] text-textMuted">
+                                    {formatIsoDate(range.start)} – {formatIsoDate(range.end)}
+                                  </p>
+                                ) : null}
+                              </div>
+                              <span className={b.deltaAbs >= 0 ? "font-semibold text-emerald-600" : "font-semibold text-rose-500"}>
+                                {b.deltaAbs >= 0 ? "+" : ""}
+                                {formatInLakh(b.deltaAbs)} Revenue ({b.contributionPercent === null ? "—" : `${b.contributionPercent.toFixed(0)}%`} of revenue change)
                               </span>
-                              {range ? (
-                                <p className="text-[11px] text-textMuted">
-                                  {formatIsoDate(range.start)} – {formatIsoDate(range.end)}
-                                </p>
-                              ) : null}
                             </div>
-                            <span className={b.deltaAbs >= 0 ? "font-semibold text-emerald-600" : "font-semibold text-rose-500"}>
-                              {b.deltaAbs >= 0 ? "+" : ""}
-                              {formatInLakh(b.deltaAbs)} Revenue ({b.contributionPercent === null ? "—" : `${b.contributionPercent.toFixed(0)}%`} of revenue change)
-                            </span>
-                          </div>
-                        );
-                      })}
+                          );
+                        })}
+                      </div>
+                      {pair.bankBreakdown.length > 5 ? (
+                        <p className="mt-1.5 text-xs text-textMuted">Showing top 5 of {pair.bankBreakdown.length} banks.</p>
+                      ) : null}
                     </div>
 
                     <div className="mb-3 grid grid-cols-2 gap-3">
@@ -3592,6 +3816,16 @@ export default function App() {
                     { label: "Admits", current: yearInsight.hasPrior ? yearInsight.currentAdmits : null, format: formatCountInLakh, deltaPercent: yearInsight.hasPrior ? yearInsight.admitsDeltaPercent : null },
                     { label: "Transactions", current: yearInsight.hasPrior ? yearInsight.currentTransactions : null, format: formatCountInLakh, deltaPercent: yearInsight.hasPrior ? yearInsight.txnDeltaPercent : null },
                   ]}
+                  bankInfo={
+                    yearInsight.hasPrior
+                      ? {
+                          currentBanks: yearInsight.bankBreakdown.filter((b) => b.currentRevenue).map((b) => b.bankName),
+                          priorBanks: yearInsight.bankBreakdown.filter((b) => b.priorRevenue).map((b) => b.bankName),
+                          currentLabel: yearInsight.year,
+                          priorLabel: yearInsight.priorYear,
+                        }
+                      : null
+                  }
                 />
               </div>
 
@@ -3614,28 +3848,39 @@ export default function App() {
                   </p>
 
                   <p className="mb-2 text-xs font-bold uppercase tracking-[0.15em] text-textMuted">Who drove it (Revenue)</p>
-                  <div className="mb-3 space-y-1.5">
-                    {yearInsight.bankBreakdown.slice(0, 5).map((b) => {
-                      const range = bankActiveRangeMap.get(b.bankName);
-                      return (
-                        <div key={b.bankName} className="flex items-center gap-3 text-sm">
-                          <div className="w-40 flex-shrink-0">
-                            <span className="text-textMain">
-                              Rank #{globalBankRankMap.get(b.bankName) || "—"} - {b.bankName}
+                  <div className="mb-3">
+                    {yearInsight.bankBreakdown.slice(0, 5).some((b) => b.contributionPercent !== null && Math.abs(b.contributionPercent) > 100) ? (
+                      <p className="mb-2 text-xs italic text-textMuted">
+                        Some banks show contribution over 100% because gains and losses across banks partly offset each other — the net change is
+                        smaller than individual bank swings.
+                      </p>
+                    ) : null}
+                    <div className="space-y-1.5">
+                      {yearInsight.bankBreakdown.slice(0, 5).map((b) => {
+                        const range = bankActiveRangeMap.get(b.bankName);
+                        return (
+                          <div key={b.bankName} className="flex items-center gap-3 text-sm">
+                            <div className="w-40 flex-shrink-0">
+                              <span className="text-textMain">
+                                Rank #{globalBankRankMap.get(b.bankName) || "—"} - {b.bankName}
+                              </span>
+                              {range ? (
+                                <p className="text-[11px] text-textMuted">
+                                  {formatIsoDate(range.start)} – {formatIsoDate(range.end)}
+                                </p>
+                              ) : null}
+                            </div>
+                            <span className={b.deltaAbs >= 0 ? "font-semibold text-emerald-600" : "font-semibold text-rose-500"}>
+                              {b.deltaAbs >= 0 ? "+" : ""}
+                              {formatInLakh(b.deltaAbs)} Revenue ({b.contributionPercent === null ? "—" : `${b.contributionPercent.toFixed(0)}%`} of revenue change)
                             </span>
-                            {range ? (
-                              <p className="text-[11px] text-textMuted">
-                                {formatIsoDate(range.start)} – {formatIsoDate(range.end)}
-                              </p>
-                            ) : null}
                           </div>
-                          <span className={b.deltaAbs >= 0 ? "font-semibold text-emerald-600" : "font-semibold text-rose-500"}>
-                            {b.deltaAbs >= 0 ? "+" : ""}
-                            {formatInLakh(b.deltaAbs)} Revenue ({b.contributionPercent === null ? "—" : `${b.contributionPercent.toFixed(0)}%`} of revenue change)
-                          </span>
-                        </div>
-                      );
-                    })}
+                        );
+                      })}
+                    </div>
+                    {yearInsight.bankBreakdown.length > 5 ? (
+                      <p className="mt-1.5 text-xs text-textMuted">Showing top 5 of {yearInsight.bankBreakdown.length} banks.</p>
+                    ) : null}
                   </div>
 
                   <div className="grid grid-cols-2 gap-3">
