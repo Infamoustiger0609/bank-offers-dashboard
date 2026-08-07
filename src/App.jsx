@@ -18,6 +18,12 @@ import {
   YAxis,
 } from "recharts";
 
+const FISCAL_YEAR_TARGETS = {
+  "24-25": null,
+  "25-26": 100_00_00_000, // ₹100 Cr
+  "26-27": 150_00_00_000, // ₹150 Cr
+};
+
 const COLUMN_MAP = {
   offerName: "Card Offers Performance",
   bankName: "Bank Name",
@@ -196,6 +202,12 @@ function formatInteger(value) {
   return new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(value || 0);
 }
 
+function formatInCr(value) {
+  if (value === null || value === undefined) return "NA";
+  const crValue = Number(value) / 10000000;
+  return `₹${crValue.toFixed(1)} Cr`;
+}
+
 function formatDateLabel(date) {
   if (!date) return "Unknown Date";
   return new Intl.DateTimeFormat("en-GB", { month: "short", year: "numeric" }).format(date);
@@ -257,6 +269,11 @@ function calendarYearForFiscalMonth(fiscalYearLabel, calendarMonthNumber) {
   // calendarMonthNumber is 1-12 (Jan=1 ... Dec=12), matching monthKey's month part
   const fyStartYear = 2000 + Number(fiscalYearLabel.split("-")[0]);
   return calendarMonthNumber >= 4 ? fyStartYear : fyStartYear + 1;
+}
+
+function priorFiscalYearLabel(fiscalYearLabel) {
+  const [startYY, endYY] = fiscalYearLabel.split("-").map(Number);
+  return `${String(startYY - 1).padStart(2, "0")}-${String(endYY - 1).padStart(2, "0")}`;
 }
 
 const FISCAL_MONTH_ORDER = ["Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"];
@@ -1438,6 +1455,226 @@ function GroupDetailModal({ group, breakdown, onClose }) {
   );
 }
 
+function buildCumulativeSeries(fiscalYear, revenueByMonthKey) {
+  let cumulative = 0;
+  return FISCAL_MONTH_ORDER.map((monthAbbrev) => {
+    const monthNumber = MONTH_NAMES.indexOf(monthAbbrev) + 1;
+    const calYear = calendarYearForFiscalMonth(fiscalYear, monthNumber);
+    const monthKey = `${String(monthNumber).padStart(2, "0")}-${calYear}`;
+    const monthRevenue = revenueByMonthKey.get(monthKey) || 0;
+    cumulative += monthRevenue;
+    return { monthAbbrev, monthKey, monthRevenue, cumulative };
+  });
+}
+
+function buildMonthlyRevenueByFY(fiscalYear, rows) {
+  const map = new Map();
+  rows.forEach((row) => {
+    if (row.fiscalYear !== fiscalYear || row.monthKey === "Unknown") return;
+    map.set(row.monthKey, (map.get(row.monthKey) || 0) + row.transactionTotal);
+  });
+  return map;
+}
+
+function TargetDetailModal({ achievementData, rows, latestDataDate, onClose }) {
+  const currentFY = latestDataDate ? getFiscalYearLabel(latestDataDate) : null;
+  const currentFYMonthAbbrev = latestDataDate ? MONTH_NAMES[latestDataDate.getMonth()] : null;
+  const currentFYElapsed = currentFYMonthAbbrev ? FISCAL_MONTH_ORDER.indexOf(currentFYMonthAbbrev) + 1 : 0;
+  const currentEntry = currentFY ? achievementData.find((entry) => entry.fiscalYear === currentFY) : null;
+  const latestCalYear = latestDataDate ? latestDataDate.getFullYear() : null;
+  const latestCalMonth = latestDataDate ? latestDataDate.getMonth() + 1 : null;
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/40 px-4 backdrop-blur-sm" onClick={onClose}>
+      <div
+        className="w-full max-w-4xl max-h-[85vh] overflow-y-auto rounded-[2rem] border border-white/60 bg-white p-6 shadow-soft scrollbar-thin"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Info Section</p>
+            <h3 className="mt-2 font-display text-2xl font-bold text-textMain">Fiscal Year Revenue Targets</h3>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-full border border-borderSoft px-3 py-2 text-sm font-bold text-textMuted hover:bg-slate-50">
+            Close
+          </button>
+        </div>
+
+        <div className="mt-5 space-y-3">
+          {achievementData.map((entry) => {
+            const cappedPercent = entry.percent === null ? 0 : Math.min(100, Math.max(0, entry.percent));
+            return (
+              <div key={entry.fiscalYear} className="rounded-2xl border border-borderSoft p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-sm font-bold text-textMain">FY {entry.fiscalYear}</p>
+                  <p className="text-xs font-semibold text-textMuted">
+                    Target: {entry.target === null ? "NA" : formatInCr(entry.target)} · Achieved: {formatInCr(entry.achieved)}
+                  </p>
+                </div>
+                {entry.target !== null ? (
+                  <>
+                    <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-slate-100">
+                      <div
+                        className={`h-full rounded-full ${entry.percent >= 100 ? "bg-emerald-500" : "bg-accentBlue"}`}
+                        style={{ width: `${cappedPercent}%` }}
+                      />
+                    </div>
+                    <p className="mt-1 text-xs font-bold text-textMuted">{entry.percent.toFixed(1)}% of target achieved</p>
+                  </>
+                ) : (
+                  <p className="mt-2 text-xs text-textMuted">No target set for this fiscal year.</p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {currentEntry && currentEntry.target !== null
+          ? (() => {
+              const monthsRemaining = 12 - currentFYElapsed;
+              const shortfall = currentEntry.target - currentEntry.achieved;
+              const currentFYPrior = priorFiscalYearLabel(currentFY);
+              const currentFYPriorMonthly = buildMonthlyRevenueByFY(currentFYPrior, rows);
+              const remainingMonths = FISCAL_MONTH_ORDER.slice(currentFYElapsed).map((monthAbbrev) => {
+                const monthNumber = MONTH_NAMES.indexOf(monthAbbrev) + 1;
+                const priorCalYear = calendarYearForFiscalMonth(currentFYPrior, monthNumber);
+                const priorMonthKey = `${String(monthNumber).padStart(2, "0")}-${priorCalYear}`;
+                return { monthAbbrev, priorRevenue: currentFYPriorMonthly.get(priorMonthKey) || 0 };
+              });
+              const sumPriorRemaining = remainingMonths.reduce((sum, m) => sum + m.priorRevenue, 0);
+
+              let requiredSummaryLine = null;
+              let requiredRows = [];
+              if (currentEntry.achieved >= currentEntry.target) {
+                requiredSummaryLine = "Target already met";
+              } else if (monthsRemaining <= 0) {
+                requiredSummaryLine = "No months remaining";
+              } else {
+                // Weight the remaining shortfall by FY_prior's actual seasonal split across the
+                // same remaining months, so a historically strong month (e.g. Dec) carries a higher
+                // ask than a historically weak one (e.g. Sep) instead of one flat number repeated.
+                requiredRows = remainingMonths.map((m) => ({
+                  monthAbbrev: m.monthAbbrev,
+                  required: sumPriorRemaining ? shortfall * (m.priorRevenue / sumPriorRemaining) : shortfall / monthsRemaining,
+                }));
+              }
+
+              return (
+                <div className="mt-5 rounded-2xl border border-accentBlue/30 bg-blue-50 p-4">
+                  <p className="text-xs font-bold uppercase tracking-[0.15em] text-accentBlue">Current FY — {currentFY}</p>
+                  <div className="mt-2 grid grid-cols-2 gap-3 sm:grid-cols-3">
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-[0.15em] text-textMuted">Achieved</p>
+                      <p className="text-lg font-extrabold text-textMain">{formatInCr(currentEntry.achieved)}</p>
+                      <p className="text-xs text-textMuted">{currentEntry.percent.toFixed(1)}% of target</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-[0.15em] text-textMuted">Months Remaining</p>
+                      <p className="text-lg font-extrabold text-textMain">{Math.max(0, monthsRemaining)}</p>
+                    </div>
+                    {requiredSummaryLine ? (
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-[0.15em] text-textMuted">Required Run Rate</p>
+                        <p className="text-lg font-extrabold text-textMain">{requiredSummaryLine}</p>
+                      </div>
+                    ) : null}
+                  </div>
+                  {requiredRows.length ? (
+                    <div className="mt-3 border-t border-accentBlue/20 pt-3">
+                      <p className="text-[10px] font-bold uppercase tracking-[0.15em] text-textMuted">
+                        Required Revenue by Remaining Month (seasonally weighted)
+                      </p>
+                      <div className="mt-1.5 grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-3">
+                        {requiredRows.map((m) => (
+                          <div key={m.monthAbbrev} className="flex items-center justify-between text-xs">
+                            <span className="font-semibold text-textMuted">{m.monthAbbrev}</span>
+                            <span className="font-bold text-textMain">{formatInCr(m.required)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })()
+          : null}
+
+        <div className="mt-5 space-y-4">
+          {achievementData
+            .filter((entry) => entry.target !== null)
+            .map((entry) => {
+              const priorFY = priorFiscalYearLabel(entry.fiscalYear);
+              const currentMonthly = buildMonthlyRevenueByFY(entry.fiscalYear, rows);
+              const priorMonthly = buildMonthlyRevenueByFY(priorFY, rows);
+              const currentSeries = buildCumulativeSeries(entry.fiscalYear, currentMonthly);
+              const priorSeries = buildCumulativeSeries(priorFY, priorMonthly);
+              const priorActualTotal = priorSeries.length ? priorSeries[priorSeries.length - 1].cumulative : 0;
+              // Seasonally-weighted pro-rata target: scale FY_prior's actual monthly figure (not
+              // its cumulative-to-date figure) by this year's target vs. last year's total actual,
+              // so each month's target follows last year's standalone seasonal shape instead of a
+              // flat straight-line ramp. Falls back to a flat target/12 per month when there's no
+              // usable prior-year data (e.g. this is the first year in the dataset).
+              const growthFactor = priorActualTotal ? entry.target / priorActualTotal : null;
+
+              const monthRows = currentSeries.map((m, index) => {
+                const priorMonthRevenue = priorSeries[index].monthRevenue;
+                const proRataTarget = growthFactor !== null ? priorMonthRevenue * growthFactor : entry.target / 12;
+                const vsTarget = m.monthRevenue - proRataTarget;
+                const vsTargetPercent = proRataTarget ? (Math.abs(vsTarget) / proRataTarget) * 100 : null;
+                const [mkMonth, mkYear] = m.monthKey.split("-").map(Number);
+                const isFuture =
+                  latestCalYear !== null && (mkYear > latestCalYear || (mkYear === latestCalYear && mkMonth > latestCalMonth));
+                return { ...m, proRataTarget, vsTarget, vsTargetPercent, isFuture };
+              });
+
+              return (
+                <div key={entry.fiscalYear} className="rounded-2xl border border-borderSoft p-4">
+                  <p className="mb-2 text-xs font-bold uppercase tracking-[0.15em] text-textMuted">FY {entry.fiscalYear} — Month by Month</p>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-xs font-bold uppercase tracking-[0.15em] text-textMuted">
+                          <th className="py-1.5 pr-3">Month</th>
+                          <th className="py-1.5 pr-3">Revenue</th>
+                          <th className="py-1.5 pr-3">Cumulative</th>
+                          <th className="py-1.5 pr-3">Pro-rata Target</th>
+                          <th className="py-1.5">vs Target</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-borderSoft">
+                        {monthRows.map((m) => (
+                          <tr key={m.monthKey}>
+                            <td className="py-1.5 pr-3 font-semibold text-textMain">{m.monthAbbrev}</td>
+                            <td className="py-1.5 pr-3 text-textMain">{formatInCr(m.monthRevenue)}</td>
+                            <td className="py-1.5 pr-3 text-textMain">{formatInCr(m.cumulative)}</td>
+                            <td className="py-1.5 pr-3 text-textMuted">{formatInCr(m.proRataTarget)}</td>
+                            <td className="py-1.5">
+                              {m.isFuture || m.vsTargetPercent === null ? (
+                                <span className="text-textMuted">—</span>
+                              ) : m.vsTarget >= 0 ? (
+                                <span className="font-bold text-emerald-600">
+                                  ▲ ahead {formatInCr(Math.abs(m.vsTarget))} ({m.vsTargetPercent.toFixed(1)}%)
+                                </span>
+                              ) : (
+                                <span className="font-bold text-rose-500">
+                                  ▼ behind {formatInCr(Math.abs(m.vsTarget))} ({m.vsTargetPercent.toFixed(1)}%)
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DiscountSplitTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null;
   const data = payload[0].payload;
@@ -1580,6 +1817,7 @@ export default function App() {
   const [expandedOfferUpiPartner, setExpandedOfferUpiPartner] = useState(null);
   const [showComparisonModal, setShowComparisonModal] = useState(false);
   const [groupDetailOpen, setGroupDetailOpen] = useState(null); // null | "A" | "B"
+  const [showTargetDetail, setShowTargetDetail] = useState(false);
   const [comparisonMode, setComparisonMode] = useState("none");
   const [trendMode, setTrendMode] = useState("monthly");
   const [seasonalMetric, setSeasonalMetric] = useState("revenue");
@@ -1621,6 +1859,20 @@ export default function App() {
   const fiscalMonths = useMemo(() => {
     const present = new Set(rows.map((r) => (r.date ? MONTH_NAMES[r.date.getMonth()] : null)));
     return FISCAL_MONTH_ORDER.filter((m) => present.has(m));
+  }, [rows]);
+
+  const fiscalYearAchievement = useMemo(() => {
+    const revenueByFY = new Map();
+    rows.forEach((row) => {
+      if (!row.fiscalYear || row.fiscalYear === "Unknown") return;
+      revenueByFY.set(row.fiscalYear, (revenueByFY.get(row.fiscalYear) || 0) + row.transactionTotal);
+    });
+    return Object.keys(FISCAL_YEAR_TARGETS).map((fy) => {
+      const achieved = revenueByFY.get(fy) || 0;
+      const target = FISCAL_YEAR_TARGETS[fy];
+      const percent = target ? (achieved / target) * 100 : null;
+      return { fiscalYear: fy, achieved, target, percent };
+    });
   }, [rows]);
 
   const latestDataDate = useMemo(
@@ -2278,7 +2530,7 @@ export default function App() {
   const selectedBankRow = useMemo(() => bankRows.find((bank) => bank.bankName === selectedBank) || null, [bankRows, selectedBank]);
   const selectedBankOffersEntry = useMemo(() => offersByBank.find((entry) => entry.bankName === selectedBank) || null, [offersByBank, selectedBank]);
   const selectedBankDiscountEntry = useMemo(() => discountData.find((entry) => entry.bankName === selectedBank) || null, [discountData, selectedBank]);
-  const anyModalOpen = Boolean(selectedBank || selectedOffer || showOffersByBank || showOffersByUpi);
+  const anyModalOpen = Boolean(selectedBank || selectedOffer || showOffersByBank || showOffersByUpi || showTargetDetail);
 
   function buildPairInsight(priorYear, currentYear, relevantRowsForYear, admitsMap) {
     const currentRows = relevantRowsForYear(currentYear);
@@ -2689,15 +2941,15 @@ export default function App() {
           </div>
         </div>
 
-        {/* Row 3 (was Row 2) — Total Banks / Total Offers / Info Section, 4 equal compact boxes */}
-        <div className="grid grid-cols-4 gap-3">
-          <div className="flex h-[90px] flex-col justify-center rounded-2xl border border-white/60 bg-white/90 p-3 shadow-soft">
+        {/* Row 3 (was Row 2) — Total Banks / Total Offers / Info Section / Target, 5 equal compact boxes */}
+        <div className="grid grid-cols-5 gap-3">
+          <div className="flex h-[90px] flex-col justify-center rounded-2xl border border-white/60 bg-white/90 p-2.5 shadow-soft">
             <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500">Total Banks / UPI</p>
             <p className="mt-1 text-2xl font-extrabold text-textMain">
               {formatInteger(activeCardBanks.length)} / {formatInteger(activeUpiPartners.length)}
             </p>
           </div>
-          <div className="flex h-[90px] flex-col justify-start rounded-2xl border border-white/60 bg-white/90 p-3 shadow-soft">
+          <div className="flex h-[90px] flex-col justify-start rounded-2xl border border-white/60 bg-white/90 p-2.5 shadow-soft">
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
                 <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500">Total Offers</p>
@@ -2726,11 +2978,11 @@ export default function App() {
                 setShowOffersByUpi(true);
               }
             }}
-            className="flex h-[90px] cursor-pointer items-center justify-between gap-2 rounded-2xl border border-white/60 bg-white/90 p-3 text-left shadow-soft"
+            className="flex h-[90px] cursor-pointer items-center justify-between gap-2 rounded-2xl border border-white/60 bg-white/90 p-2.5 text-left shadow-soft"
           >
             <div className="min-w-0">
               <p className="mt-1 truncate text-sm font-bold text-textMain">UPI Partners</p>
-              <p className="text-xs text-textMuted">
+              <p className="truncate text-xs text-textMuted">
                 {formatInteger(totalOfferCountByUpiPartner)} offers across {formatInteger(upiOffersByPartner.length)} partners
               </p>
               <button
@@ -2758,11 +3010,11 @@ export default function App() {
                 setShowOffersByBank(true);
               }
             }}
-            className="flex h-[90px] cursor-pointer items-center justify-between gap-2 rounded-2xl border border-white/60 bg-white/90 p-3 text-left shadow-soft"
+            className="flex h-[90px] cursor-pointer items-center justify-between gap-2 rounded-2xl border border-white/60 bg-white/90 p-2.5 text-left shadow-soft"
           >
             <div className="min-w-0">
               <p className="mt-1 truncate text-sm font-bold text-textMain">Bank Partners</p>
-              <p className="text-xs text-textMuted">
+              <p className="truncate text-xs text-textMuted">
                 {formatInteger(totalOfferCountByBank)} offers across {formatInteger(offersByBank.length)} banks
               </p>
               <button
@@ -2779,6 +3031,48 @@ export default function App() {
             <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl border border-borderSoft bg-slate-50 text-sm font-bold text-textMuted">
               →
             </span>
+          </div>
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => setShowTargetDetail(true)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                setShowTargetDetail(true);
+              }
+            }}
+            className="flex h-[90px] cursor-pointer flex-col justify-start rounded-2xl border border-white/60 bg-white/90 p-2.5 text-left shadow-soft"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500">Target</p>
+              <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md border border-borderSoft bg-slate-50 text-[10px] font-bold text-textMuted">
+                →
+              </span>
+            </div>
+            {fyFilter.length > 0 && fyFilter.length < fiscalYears.length ? (
+              <div className="mt-0.5 space-y-0">
+                {fiscalYearAchievement
+                  .filter((entry) => fyFilter.includes(entry.fiscalYear))
+                  .map((entry) => (
+                    <div key={entry.fiscalYear} className="flex items-baseline justify-between gap-2">
+                      <span className="text-[10px] font-semibold text-textMuted">{entry.fiscalYear}</span>
+                      <span className="text-xl font-extrabold leading-none text-textMain">
+                        {entry.target === null ? "NA" : formatInCr(entry.target)}
+                      </span>
+                    </div>
+                  ))}
+              </div>
+            ) : (
+              <div className="mt-0.5 space-y-0.5">
+                {fiscalYearAchievement.map((entry) => (
+                  <div key={entry.fiscalYear} className="flex items-center justify-between text-[10px] leading-none">
+                    <span className="font-semibold text-textMuted">{entry.fiscalYear}</span>
+                    <span className="font-bold text-textMain">{entry.target === null ? "NA" : formatInCr(entry.target)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
@@ -4103,6 +4397,15 @@ export default function App() {
         breakdown={groupDetailOpen === "A" ? groupABankBreakdown : groupDetailOpen === "B" ? groupBBankBreakdown : []}
         onClose={() => setGroupDetailOpen(null)}
       />
+
+      {showTargetDetail ? (
+        <TargetDetailModal
+          achievementData={fiscalYearAchievement}
+          rows={rows}
+          latestDataDate={latestDataDate}
+          onClose={() => setShowTargetDetail(false)}
+        />
+      ) : null}
 
       <OfferModal offer={selectedOffer} onClose={() => setSelectedOffer(null)} />
       <BankModal
