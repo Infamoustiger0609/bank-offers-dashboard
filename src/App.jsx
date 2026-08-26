@@ -24,6 +24,14 @@ const FISCAL_YEAR_TARGETS = {
   "26-27": 150_00_00_000, // ₹150 Cr
 };
 
+const DEFAULT_BANK_MONTHLY_DISCOUNT_BUDGET = 1500000; // ₹15L per bank per month — flat default for all banks
+const BANK_MONTHLY_DISCOUNT_BUDGET_OVERRIDES = {
+  // "HDFC Bank": 2000000,  // example: override a specific bank's monthly budget later
+};
+function getBankMonthlyBudget(bankName) {
+  return BANK_MONTHLY_DISCOUNT_BUDGET_OVERRIDES[bankName] ?? DEFAULT_BANK_MONTHLY_DISCOUNT_BUDGET;
+}
+
 const COLUMN_MAP = {
   offerName: "Card Offers Performance",
   bankName: "Bank Name",
@@ -812,6 +820,37 @@ function aggregateGroupBankBreakdown(groupRows) {
   return [...grouped.values()].sort((a, b) => b.revenue - a.revenue);
 }
 
+function buildDiscountBudgetBreakdown(cardRows) {
+  const grouped = new Map();
+  cardRows.forEach((row) => {
+    const bankEntry = grouped.get(row.bankName) || { bankName: row.bankName, months: new Map() };
+    if (row.monthKey !== "Unknown") {
+      const monthEntry = bankEntry.months.get(row.monthKey) || { monthKey: row.monthKey, actual: 0 };
+      monthEntry.actual += row.discountAmount;
+      bankEntry.months.set(row.monthKey, monthEntry);
+    }
+    grouped.set(row.bankName, bankEntry);
+  });
+
+  return [...grouped.values()]
+    .map((bankEntry) => {
+      const monthlyBudget = getBankMonthlyBudget(bankEntry.bankName);
+      const monthly = [...bankEntry.months.values()]
+        .map((m) => ({ ...m, budget: monthlyBudget, variance: m.actual - monthlyBudget }))
+        .sort((a, b) => {
+          const [am, ay] = a.monthKey.split("-").map(Number);
+          const [bm, by] = b.monthKey.split("-").map(Number);
+          return new Date(ay, am - 1, 1) - new Date(by, bm - 1, 1);
+        });
+      const activeMonthCount = monthly.length;
+      const actualDiscount = monthly.reduce((sum, m) => sum + m.actual, 0);
+      const budget = activeMonthCount * monthlyBudget;
+      const variance = actualDiscount - budget;
+      return { bankName: bankEntry.bankName, activeMonthCount, actualDiscount, budget, variance, monthly };
+    })
+    .sort((a, b) => a.variance - b.variance);
+}
+
 function aggregateBanks(rows) {
   const grouped = new Map();
   rows.forEach((row) => {
@@ -1455,6 +1494,143 @@ function GroupDetailModal({ group, breakdown, onClose }) {
   );
 }
 
+function DiscountBudgetModal({ breakdown, fyLabel, monthLabel, onBankClick, onClose }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-[2rem] bg-white p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="mb-2 flex items-center justify-between">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Discount Budget</p>
+            <h2 className="mt-1 font-display text-2xl font-bold text-textMain">Bank Discount Spend vs Budget</h2>
+          </div>
+          <button type="button" onClick={onClose} className="text-sm font-bold text-textMuted hover:text-textMain">
+            ✕ Close
+          </button>
+        </div>
+        <p className="mt-1 text-sm text-textMuted">
+          {fyLabel} · {monthLabel} — Card banks only; UPI partners have no budgets.
+        </p>
+
+        <div className="mt-4 space-y-3">
+          {breakdown.length === 0 ? (
+            <p className="rounded-2xl border border-dashed border-borderSoft bg-slate-50 p-6 text-center text-sm font-semibold text-textMuted">
+              No bank data in the current filter — Discount Budget only applies to Card/bank partners.
+            </p>
+          ) : (
+            breakdown.map((bank) => {
+              const ahead = bank.variance >= 0;
+              return (
+                <div
+                  key={bank.bankName}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => onBankClick(bank.bankName)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      onBankClick(bank.bankName);
+                    }
+                  }}
+                  className="flex cursor-pointer flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/60 bg-white/90 p-4 text-left shadow-soft"
+                >
+                  <div className="min-w-0">
+                    <p className="font-bold text-textMain">{bank.bankName}</p>
+                    <p className="text-xs text-textMuted">
+                      {bank.activeMonthCount} active month{bank.activeMonthCount === 1 ? "" : "s"}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-4">
+                    <div className="text-right">
+                      <p className="text-[10px] font-bold uppercase tracking-[0.15em] text-textMuted">Actual</p>
+                      <p className="text-sm font-bold text-textMain">{formatInLakh(bank.actualDiscount)}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-[10px] font-bold uppercase tracking-[0.15em] text-textMuted">Budget</p>
+                      <p className="text-sm font-bold text-textMain">{formatInLakh(bank.budget)}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-[10px] font-bold uppercase tracking-[0.15em] text-textMuted">Variance</p>
+                      {ahead ? (
+                        <span className="text-sm font-bold text-emerald-600">▲ ahead {formatInLakh(Math.abs(bank.variance))}</span>
+                      ) : (
+                        <span className="text-sm font-bold text-rose-500">▼ behind {formatInLakh(Math.abs(bank.variance))}</span>
+                      )}
+                    </div>
+                    <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl border border-borderSoft bg-slate-50 text-sm font-bold text-textMuted">
+                      →
+                    </span>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DiscountBudgetBankModal({ bank, onClose }) {
+  if (!bank) return null;
+  const ahead = bank.variance >= 0;
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="max-h-[80vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="mb-2 flex items-center justify-between">
+          <h3 className="font-display text-xl font-bold text-textMain">{bank.bankName} — Discount Budget</h3>
+          <button type="button" onClick={onClose} className="text-sm font-bold text-textMuted hover:text-textMain">
+            ✕ Close
+          </button>
+        </div>
+        <p className="mb-4 text-sm font-semibold text-textMuted">
+          Total: {formatInLakh(bank.actualDiscount)} actual vs {formatInLakh(bank.budget)} budget —{" "}
+          {ahead ? (
+            <span className="font-bold text-emerald-600">▲ ahead {formatInLakh(Math.abs(bank.variance))}</span>
+          ) : (
+            <span className="font-bold text-rose-500">▼ behind {formatInLakh(Math.abs(bank.variance))}</span>
+          )}
+        </p>
+        <table className="min-w-full text-sm">
+          <thead>
+            <tr className="text-left text-xs font-bold uppercase tracking-[0.15em] text-textMuted">
+              <th className="py-2 pr-4">Month</th>
+              <th className="py-2 pr-4">Actual Discount</th>
+              <th className="py-2 pr-4">Budget</th>
+              <th className="py-2">Variance</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-borderSoft">
+            {bank.monthly.map((m) => {
+              const monthAhead = m.variance >= 0;
+              const variancePercent = m.budget ? (Math.abs(m.variance) / m.budget) * 100 : null;
+              return (
+                <tr key={m.monthKey}>
+                  <td className="py-2 pr-4 font-semibold text-textMain">{formatMonthKeyLabel(m.monthKey)}</td>
+                  <td className="py-2 pr-4 text-textMain">{formatInLakh(m.actual)}</td>
+                  <td className="py-2 pr-4 text-textMain">{formatInLakh(m.budget)}</td>
+                  <td className="py-2">
+                    {monthAhead ? (
+                      <span className="font-bold text-emerald-600">
+                        ▲ ahead {formatInLakh(Math.abs(m.variance))}
+                        {variancePercent !== null ? ` (${variancePercent.toFixed(1)}%)` : ""}
+                      </span>
+                    ) : (
+                      <span className="font-bold text-rose-500">
+                        ▼ behind {formatInLakh(Math.abs(m.variance))}
+                        {variancePercent !== null ? ` (${variancePercent.toFixed(1)}%)` : ""}
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function buildCumulativeSeries(fiscalYear, revenueByMonthKey) {
   let cumulative = 0;
   return FISCAL_MONTH_ORDER.map((monthAbbrev) => {
@@ -1818,6 +1994,8 @@ export default function App() {
   const [showComparisonModal, setShowComparisonModal] = useState(false);
   const [groupDetailOpen, setGroupDetailOpen] = useState(null); // null | "A" | "B"
   const [showTargetDetail, setShowTargetDetail] = useState(false);
+  const [showDiscountBudget, setShowDiscountBudget] = useState(false);
+  const [discountBudgetBankOpen, setDiscountBudgetBankOpen] = useState(null); // null | bankName
   const [comparisonMode, setComparisonMode] = useState("none");
   const [trendMode, setTrendMode] = useState("monthly");
   const [seasonalMetric, setSeasonalMetric] = useState("revenue");
@@ -2063,6 +2241,16 @@ export default function App() {
 
   const cardRows = useMemo(() => filteredRows.filter((r) => r.paymentCategory === "Card"), [filteredRows]);
   const upiRows = useMemo(() => filteredRows.filter((r) => r.paymentCategory === "UPI"), [filteredRows]);
+
+  const discountBudgetBreakdown = useMemo(() => buildDiscountBudgetBreakdown(cardRows), [cardRows]);
+  const discountBudgetBankEntry = useMemo(
+    () => discountBudgetBreakdown.find((b) => b.bankName === discountBudgetBankOpen) || null,
+    [discountBudgetBreakdown, discountBudgetBankOpen],
+  );
+  const discountBudgetFyLabel =
+    fyFilter.length === 0 ? "No FY selected" : fyFilter.length === fiscalYears.length ? "All FYs" : fyFilter.join(", ");
+  const discountBudgetMonthLabel =
+    monthFilter.length === 0 ? "No month selected" : monthFilter.length === fiscalMonths.length ? "All Months" : monthFilter.join(", ");
 
   const cardOfferTypeBreakdown = useMemo(() => {
     const grouped = new Map();
@@ -2738,6 +2926,13 @@ export default function App() {
               className="flex items-center gap-1.5 rounded-full border-2 border-accentBlue bg-accentBlue px-4 py-1.5 text-xs font-extrabold uppercase tracking-wide text-white shadow-sm transition hover:bg-blue-700"
             >
               ⇄ Comparison Module
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowDiscountBudget(true)}
+              className="flex items-center gap-1.5 rounded-full border-2 border-accentBlue bg-accentBlue px-4 py-1.5 text-xs font-extrabold uppercase tracking-wide text-white shadow-sm transition hover:bg-blue-700"
+            >
+              Discount Budget
             </button>
           </div>
 
@@ -4232,7 +4427,7 @@ export default function App() {
 
       {showComparisonModal ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setShowComparisonModal(false)}>
-          <div className="max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded-[2rem] bg-white p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+          <div className="max-h-[90vh] w-full max-w-6xl overflow-y-auto rounded-[2rem] bg-white p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="mb-2 flex items-center justify-between">
               <div>
                 <p className="text-xs font-bold uppercase tracking-[0.24em] text-textMuted">Custom Comparison</p>
@@ -4246,7 +4441,7 @@ export default function App() {
               Independent of the main Date/Bank/Offer filters above — each group has its own banks and date range.
             </p>
 
-            <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <div className="mt-4 flex flex-col gap-3">
               <div className="rounded-2xl border border-borderSoft bg-slate-50 p-4">
                 <div className="flex items-center justify-between">
                   <p className="text-xs font-bold uppercase tracking-[0.18em] text-textMuted">Group A</p>
@@ -4260,34 +4455,38 @@ export default function App() {
                     UPI: {groupAUpiCount}
                   </button>
                 </div>
-                <div className="mt-2">
-                  <MultiSelectDropdown
-                    options={banks}
-                    selected={groupABanks}
-                    onToggle={(bank) =>
-                      setGroupABanks((current) => (current.includes(bank) ? current.filter((item) => item !== bank) : [...current, bank]))
-                    }
-                    onClear={() => setGroupABanks([])}
-                    label="bank"
-                  />
-                </div>
-                <div className="mt-3 flex flex-col gap-2">
-                  <MultiSelectDropdown
-                    options={fiscalYears}
-                    selected={groupAFy}
-                    onToggle={(fy) => setGroupAFy((current) => (current.includes(fy) ? current.filter((i) => i !== fy) : [...current, fy]))}
-                    onClear={() => setGroupAFy([])}
-                    label="FY"
-                    showSelectedNames
-                  />
-                  <MultiSelectDropdown
-                    options={fiscalMonths}
-                    selected={groupAMonths}
-                    onToggle={(m) => setGroupAMonths((current) => (current.includes(m) ? current.filter((i) => i !== m) : [...current, m]))}
-                    onClear={() => setGroupAMonths([])}
-                    label="month"
-                    showSelectedNames
-                  />
+                <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                  <div className="min-w-0 flex-1">
+                    <MultiSelectDropdown
+                      options={banks}
+                      selected={groupABanks}
+                      onToggle={(bank) =>
+                        setGroupABanks((current) => (current.includes(bank) ? current.filter((item) => item !== bank) : [...current, bank]))
+                      }
+                      onClear={() => setGroupABanks([])}
+                      label="bank"
+                    />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <MultiSelectDropdown
+                      options={fiscalYears}
+                      selected={groupAFy}
+                      onToggle={(fy) => setGroupAFy((current) => (current.includes(fy) ? current.filter((i) => i !== fy) : [...current, fy]))}
+                      onClear={() => setGroupAFy([])}
+                      label="FY"
+                      showSelectedNames
+                    />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <MultiSelectDropdown
+                      options={fiscalMonths}
+                      selected={groupAMonths}
+                      onToggle={(m) => setGroupAMonths((current) => (current.includes(m) ? current.filter((i) => i !== m) : [...current, m]))}
+                      onClear={() => setGroupAMonths([])}
+                      label="month"
+                      showSelectedNames
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -4304,34 +4503,38 @@ export default function App() {
                     UPI: {groupBUpiCount}
                   </button>
                 </div>
-                <div className="mt-2">
-                  <MultiSelectDropdown
-                    options={banks}
-                    selected={groupBBanks}
-                    onToggle={(bank) =>
-                      setGroupBBanks((current) => (current.includes(bank) ? current.filter((item) => item !== bank) : [...current, bank]))
-                    }
-                    onClear={() => setGroupBBanks([])}
-                    label="bank"
-                  />
-                </div>
-                <div className="mt-3 flex flex-col gap-2">
-                  <MultiSelectDropdown
-                    options={fiscalYears}
-                    selected={groupBFy}
-                    onToggle={(fy) => setGroupBFy((current) => (current.includes(fy) ? current.filter((i) => i !== fy) : [...current, fy]))}
-                    onClear={() => setGroupBFy([])}
-                    label="FY"
-                    showSelectedNames
-                  />
-                  <MultiSelectDropdown
-                    options={fiscalMonths}
-                    selected={groupBMonths}
-                    onToggle={(m) => setGroupBMonths((current) => (current.includes(m) ? current.filter((i) => i !== m) : [...current, m]))}
-                    onClear={() => setGroupBMonths([])}
-                    label="month"
-                    showSelectedNames
-                  />
+                <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                  <div className="min-w-0 flex-1">
+                    <MultiSelectDropdown
+                      options={banks}
+                      selected={groupBBanks}
+                      onToggle={(bank) =>
+                        setGroupBBanks((current) => (current.includes(bank) ? current.filter((item) => item !== bank) : [...current, bank]))
+                      }
+                      onClear={() => setGroupBBanks([])}
+                      label="bank"
+                    />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <MultiSelectDropdown
+                      options={fiscalYears}
+                      selected={groupBFy}
+                      onToggle={(fy) => setGroupBFy((current) => (current.includes(fy) ? current.filter((i) => i !== fy) : [...current, fy]))}
+                      onClear={() => setGroupBFy([])}
+                      label="FY"
+                      showSelectedNames
+                    />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <MultiSelectDropdown
+                      options={fiscalMonths}
+                      selected={groupBMonths}
+                      onToggle={(m) => setGroupBMonths((current) => (current.includes(m) ? current.filter((i) => i !== m) : [...current, m]))}
+                      onClear={() => setGroupBMonths([])}
+                      label="month"
+                      showSelectedNames
+                    />
+                  </div>
                 </div>
               </div>
             </div>
@@ -4406,6 +4609,17 @@ export default function App() {
           onClose={() => setShowTargetDetail(false)}
         />
       ) : null}
+
+      {showDiscountBudget ? (
+        <DiscountBudgetModal
+          breakdown={discountBudgetBreakdown}
+          fyLabel={discountBudgetFyLabel}
+          monthLabel={discountBudgetMonthLabel}
+          onBankClick={(bankName) => setDiscountBudgetBankOpen(bankName)}
+          onClose={() => setShowDiscountBudget(false)}
+        />
+      ) : null}
+      <DiscountBudgetBankModal bank={discountBudgetBankEntry} onClose={() => setDiscountBudgetBankOpen(null)} />
 
       <OfferModal offer={selectedOffer} onClose={() => setSelectedOffer(null)} />
       <BankModal

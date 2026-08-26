@@ -21,7 +21,7 @@ This is a single-page, client-only dashboard — there is no backend. All Excel 
 
 ### Almost everything is in one file
 
-`src/App.jsx` (~3800 lines) contains the entire application: constants/column maps, pure parsing/formatting/aggregation functions, several small presentational components (modals, tooltips, `StatCard`, `MultiSelectDropdown`), and one large `export default function App()` that owns all state and renders the whole page. `src/main.jsx` just mounts `<App />`. Before making a change, `grep`/search within `App.jsx` rather than assuming logic is split across files — it almost never is.
+`src/App.jsx` (~4400 lines) contains the entire application: constants/column maps, pure parsing/formatting/aggregation functions, several small presentational components (modals, tooltips, `StatCard`, `MultiSelectDropdown`), and one large `export default function App()` that owns all state and renders the whole page. `src/main.jsx` just mounts `<App />`. Before making a change, `grep`/search within `App.jsx` rather than assuming logic is split across files — it almost never is.
 
 ### Two merged data sources, one row shape
 
@@ -59,11 +59,39 @@ Functions like `computeKpis`, `aggregateBanks`, `aggregateOffers`, `aggregateMon
 
 ### "Universal" (cinema-wide) comparison metrics
 
-Some KPIs (ATP, AVT, Admits) compare bank-side numbers against cinema-wide "universal" totals pulled from optional columns (`universalTransactions`, `admits`, `universalTicketRevenue`, `universalTotalRevenue` — see `OPTIONAL_COLUMNS`) via `getMonthlyReferenceValue`. These columns are optional; the dashboard must keep working when they're absent (`universalATP`/`universalAVT` etc. fall back to `null`, and `StatCard`s render a fallback subtitle instead of the "uplift" line — see `computeUpliftOrContribution`/`UpliftOrContributionLine`).
+Some KPIs (ATP, AVT, SPH, Admits) compare bank-side numbers against cinema-wide "universal" totals pulled from optional columns (`universalTransactions`, `admits`, `universalTicketRevenue`, `universalTotalRevenue` — see `OPTIONAL_COLUMNS`) via `getMonthlyReferenceValue`. These columns are optional; the dashboard must keep working when they're absent (`universalATP`/`universalAVT`/`universalSPH` etc. fall back to `null`, and `StatCard`s render a fallback subtitle instead of the "uplift" line — see `computeUpliftOrContribution`/`UpliftOrContributionLine`). `universalSPH` has no dedicated column of its own — it's derived as Universal Total Revenue minus Universal Ticket Revenue (a stand-in for universal F&B revenue), divided by universal admits, over the same "valid months only" pattern as `universalATP`/`universalAVT`.
+
+### SPH and the Ticket/F&B split
+
+`sph` (Spend Per Head = F&B revenue ÷ admits) and `ticketFnbSplit` are computed from `atpAvtKpis` — the same Bank/UPI/Both-aware source rows used by ATP and AVT (`atpAvtSourceRows`, which branches on `paymentCategoryFilter`). `EMPTY_KPIS`/`computeKpis` carry a `fnbRevenue` field for this.
+
+### Universal background lines on trend charts (separate from the KPI uplift lines above)
+
+Independently of the StatCard-level "uplift vs universal" lines, the Month-wise Bank/UPI Performance section has its own "UNI" toggle (`showUniversal`) that overlays a dashed cinema-wide reference line on the seasonal (Month on Month) and Year on Year charts. Both charts add a second, hidden Recharts axis (`yAxisId="universal"`) so the overlay's scale never distorts the bank-side axis. On the seasonal chart specifically, the universal line is rendered **once per fiscal year** in `seasonalYears` (matching that year's own line color), not a single merged line — summing multiple fiscal years' universal figures together would silently inflate the number, since each year needs its own independent `calendarYearForFiscalMonth` lookup. `attachUniversalToSeasonalPoints`/`attachUniversalToYearlyPoints` compute this as **separate derived arrays** (`seasonalDataWithUniversal`/`yearlyDataWithUniversal`) rather than mutating `seasonalData`/`yearlyData` in place — `seasonalYears` itself derives its year-key set generically from `seasonalData`'s own object keys, so writing a `universalValue` key directly onto those objects would make it show up as a bogus extra "year" series.
+
+### Fiscal-year revenue targets (the "Target" KPI card)
+
+`FISCAL_YEAR_TARGETS` is a hardcoded `{ "24-25": null, "25-26": ..., "26-27": ... }` map (rupee amounts; `null` means no target set for that FY) — update it by hand when targets change, there's no upload path for this. `fiscalYearAchievement` computes achieved-vs-target per FY from the **full unfiltered `rows`** (both Card + UPI, ignoring every UI filter) since this is a company-wide target, not a filtered view. The Target card in the KPI ribbon shows all FYs compactly when `fyFilter` isn't meaningfully narrowed, or one large figure when it's narrowed to a genuine subset.
+
+`TargetDetailModal`'s month-by-month table is the one place in the codebase with non-trivial forecasting logic: each month's pro-rata target is **seasonally weighted**, not a flat straight-line ramp. For FY with target `target_FY`, it looks up the immediately preceding fiscal year (`priorFiscalYearLabel`) and that year's actual monthly revenue (`buildMonthlyRevenueByFY`, filtered by `row.fiscalYear`, not by date range), then `proRataTarget[month] = priorYearActual[month] × (target_FY / priorYearTotalActual)` — i.e. it scales last year's own seasonal shape (heavy months stay heavy) rather than assuming revenue accrues evenly. Falls back to a flat `target_FY / 12` when the prior FY has no data at all (e.g. the first year in the dataset). Months after `latestDataDate` are flagged `isFuture` and render as "—" instead of a red/green ahead-behind tag, since they haven't happened yet. The "Required Run Rate" block for the *current* FY applies the same seasonal-weighting idea to the remaining shortfall, splitting it across remaining months in proportion to the prior year's actual revenue for those same months (falling back to an even split only if the prior year has no data for them).
+
+### Comparison Module (Group A vs Group B)
+
+This used to be an inline page section called "Custom Comparison"; it's now a modal (`showComparisonModal`, opened via the "Comparison Module" button in the header) so it doesn't compete for space with the rest of the dashboard. Each of the two groups is independently filtered by its own bank list plus its own FY + Month selection — `filterGroupFiscal(rows, banks, fiscalYearsSelected, monthsSelected)` uses the same FY/Month model as the main filter bar, not a calendar date range. Each group panel has a clickable "BANK: X / UPI: Y" pill that opens `GroupDetailModal` with a per-bank/partner breakdown (`aggregateGroupBankBreakdown`); that breakdown's "admits" column uses `totalTickets` as a proxy, the same convention used elsewhere in the dashboard since true admits/footfall is cinema-wide, not bank-specific.
+
+### Offer card-type classification (Credit / Debit / Both)
+
+`classifyCardType(rawOfferName)` looks for "credit"/"debit" keywords in the **raw** offer name — checked before any channel-suffix/card-type-prefix stripping happens in `normalizeOfferChannel` — to bucket each unique bank+canonical-offer pair into Credit, Debit, or Both, shown in the Total Offers KPI card. Offers whose raw name mentions neither keyword are folded into **Both** (assumed to apply to both card types), not a separate "Other"/"unspecified" bucket.
 
 ### Modals
 
-All overlays (`OfferModal`, `BankModal`, `OffersByBankModal` — reused for both Bank and UPI partner breakdowns, `GroupDetailModal` for the Comparison Module) are plain components conditionally rendered at the bottom of `App()`'s JSX based on state, not a routing/portal system.
+All overlays (`OfferModal`, `BankModal`, `OffersByBankModal` — reused for both Bank and UPI partner breakdowns, `GroupDetailModal` for the Comparison Module, `TargetDetailModal` for the Target card) are plain components conditionally rendered at the bottom of `App()`'s JSX based on state, not a routing/portal system. `anyModalOpen` (used to hide the sticky filter bar) must be updated whenever a new full-page modal's open-state is added, or the filter bar will visibly float above the modal's backdrop — this has been missed more than once.
+
+Inside the MoM/YoY drill-down panels, `MetricComparisonBox` optionally takes a `bankInfo` prop (`{currentBanks, priorBanks, currentLabel, priorLabel}`) that adds a "{N} banks" pill revealing which banks were new/dropped/common between the two periods being compared (simple `Set` diffing) — omit the prop and the component renders exactly as a plain metric box.
+
+### Excel export
+
+`exportOffersToExcel(offersByEntity, filename)` (via the `xlsx` package, already used for parsing uploads) lets users download the Bank Partners / UPI Partners offer breakdowns — one row per offer per bank/partner, with the offer's active date range and Bank/UPI vs PVR contribution split — as an `.xlsx` file, via small "⬇ Download Excel" buttons on those KPI ribbon cards.
 
 ## Data format (required for uploads to parse correctly)
 
