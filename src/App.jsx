@@ -307,15 +307,6 @@ function summarizeMonthSelection(selected, allOptions) {
   return `${sorted.length} months`;
 }
 
-function formatMonthRangeLabel(selected) {
-  if (!selected.length) return "";
-  const sorted = [...selected].sort((a, b) => FISCAL_MONTH_ORDER.indexOf(a) - FISCAL_MONTH_ORDER.indexOf(b));
-  if (sorted.length === 1) return sorted[0];
-  const indices = sorted.map((m) => FISCAL_MONTH_ORDER.indexOf(m));
-  const isContiguous = indices.every((idx, i) => i === 0 || idx === indices[i - 1] + 1);
-  return isContiguous ? `${sorted[0]}–${sorted[sorted.length - 1]}` : sorted.join(", ");
-}
-
 const QUICK_PERIODS = [
   { key: "thisMonth", label: "This Month" },
   { key: "lastMonth", label: "Last Month" },
@@ -2830,15 +2821,6 @@ export default function App() {
   const selectedBankDiscountEntry = useMemo(() => discountData.find((entry) => entry.bankName === selectedBank) || null, [discountData, selectedBank]);
   const anyModalOpen = Boolean(selectedBank || selectedOffer || showOffersByBank || showOffersByUpi || showTargetDetail);
 
-  const isFyFilterNarrowed = fyFilter.length > 0 && fyFilter.length < fiscalYears.length;
-  const isMonthFilterNarrowed = monthFilter.length > 0 && monthFilter.length < fiscalMonthsForSelectedFy.length;
-  const filterSummaryStripText = [
-    isFyFilterNarrowed ? `FY ${[...fyFilter].sort((a, b) => Number(a.split("-")[0]) - Number(b.split("-")[0])).join(", ")}` : null,
-    isMonthFilterNarrowed ? formatMonthRangeLabel(monthFilter) : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-
   function buildPairInsight(priorYear, currentYear, relevantRowsForYear, admitsMap) {
     const currentRows = relevantRowsForYear(currentYear);
     const priorRows = relevantRowsForYear(priorYear);
@@ -3180,12 +3162,6 @@ export default function App() {
             {universalData.inconsistent.size > 0 ? (
               <p>Inconsistent universal totals found for: {[...universalData.inconsistent].map(formatMonthKeyLabel).join(", ")}</p>
             ) : null}
-          </div>
-        ) : null}
-
-        {filterSummaryStripText && !anyModalOpen ? (
-          <div className="-mx-4 border-b border-borderSoft bg-blue-50/60 px-4 py-1.5 text-center text-xs font-bold text-accentBlue sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
-            {filterSummaryStripText}
           </div>
         ) : null}
 
