@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import pvrInoxLogo from "./Assets/pvr-inox-logo-transparent.png";
+import defaultBankDataUrl from "./Assets/BANK_DATA_APR24-AUG26.xlsx";
+import defaultUpiDataUrl from "./Assets/UPI DATA 24 APR - 26 JUL.xlsx";
 import {
   CartesianGrid,
   Bar,
@@ -17,6 +19,9 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+
+const DEFAULT_BANK_FILE_NAME = "BANK_DATA_APR24-AUG26.xlsx";
+const DEFAULT_UPI_FILE_NAME = "UPI DATA 24 APR - 26 JUL.xlsx";
 
 const FISCAL_YEAR_TARGETS = {
   "24-25": null,
@@ -285,6 +290,31 @@ function priorFiscalYearLabel(fiscalYearLabel) {
 }
 
 const FISCAL_MONTH_ORDER = ["Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"];
+
+function summarizeFySelection(selected, allOptions) {
+  if (selected.length === 0) return "No FY selected";
+  if (selected.length === allOptions.length) return "All FYs";
+  const sorted = [...selected].sort((a, b) => Number(a.split("-")[0]) - Number(b.split("-")[0]));
+  if (sorted.length === 1) return `FY ${sorted[0]}`;
+  return `FY ${sorted[0]} +${sorted.length - 1}`;
+}
+
+function summarizeMonthSelection(selected, allOptions) {
+  if (selected.length === 0) return "No month selected";
+  if (selected.length === allOptions.length) return "All Months";
+  const sorted = [...selected].sort((a, b) => FISCAL_MONTH_ORDER.indexOf(a) - FISCAL_MONTH_ORDER.indexOf(b));
+  if (sorted.length <= 3) return sorted.join(", ");
+  return `${sorted.length} months`;
+}
+
+function formatMonthRangeLabel(selected) {
+  if (!selected.length) return "";
+  const sorted = [...selected].sort((a, b) => FISCAL_MONTH_ORDER.indexOf(a) - FISCAL_MONTH_ORDER.indexOf(b));
+  if (sorted.length === 1) return sorted[0];
+  const indices = sorted.map((m) => FISCAL_MONTH_ORDER.indexOf(m));
+  const isContiguous = indices.every((idx, i) => i === 0 || idx === indices[i - 1] + 1);
+  return isContiguous ? `${sorted[0]}–${sorted[sorted.length - 1]}` : sorted.join(", ");
+}
 
 const QUICK_PERIODS = [
   { key: "thisMonth", label: "This Month" },
@@ -752,6 +782,18 @@ function parseUpiWorkbookRows(workbook) {
   return { parsedRows, missingColumns };
 }
 
+function parseCardArrayBuffer(arrayBuffer) {
+  const workbook = XLSX.read(arrayBuffer, { type: "array" });
+  const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+  const jsonRows = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
+  return parseWorkbookRows(jsonRows);
+}
+
+function parseUpiArrayBuffer(arrayBuffer) {
+  const workbook = XLSX.read(arrayBuffer, { type: "array" });
+  return parseUpiWorkbookRows(workbook);
+}
+
 function getMonthlyReferenceValue(rows, field) {
   const map = new Map();
   const inconsistent = new Set();
@@ -1143,7 +1185,7 @@ function StatCard({ title, value, subtitle, color, icon, delta, extra }) {
   );
 }
 
-function MultiSelectDropdown({ options, selected, onToggle, onClear, label, showSelectedNames = false }) {
+function MultiSelectDropdown({ options, selected, onToggle, onClear, label, showSelectedNames = false, summaryText = null }) {
   const [open, setOpen] = useState(false);
   const panelRef = useRef(null);
   const allSelected = options.length > 0 && selected.length === options.length;
@@ -1164,13 +1206,15 @@ function MultiSelectDropdown({ options, selected, onToggle, onClear, label, show
         className="flex w-full min-w-[220px] items-center justify-between rounded-2xl border border-borderSoft bg-white px-4 py-3 text-left text-sm font-semibold text-textMain shadow-sm"
       >
         <span className="truncate">
-          {selected.length === 0
-            ? `No ${label}s selected`
-            : allSelected
-              ? `All ${label.charAt(0).toUpperCase()}${label.slice(1)}s`
-              : showSelectedNames
-                ? selected.join(", ")
-                : `${selected.length} ${label}${selected.length > 1 ? "s" : ""} selected`}
+          {summaryText !== null
+            ? summaryText
+            : selected.length === 0
+              ? `No ${label}s selected`
+              : allSelected
+                ? `All ${label.charAt(0).toUpperCase()}${label.slice(1)}s`
+                : showSelectedNames
+                  ? selected.join(", ")
+                  : `${selected.length} ${label}${selected.length > 1 ? "s" : ""} selected`}
         </span>
         <span className="text-textMuted">{open ? "▲" : "▼"}</span>
       </button>
@@ -1792,15 +1836,20 @@ function TargetDetailModal({ achievementData, rows, latestDataDate, onClose }) {
               // usable prior-year data (e.g. this is the first year in the dataset).
               const growthFactor = priorActualTotal ? entry.target / priorActualTotal : null;
 
+              let cumulativeProRataTarget = 0;
               const monthRows = currentSeries.map((m, index) => {
                 const priorMonthRevenue = priorSeries[index].monthRevenue;
-                const proRataTarget = growthFactor !== null ? priorMonthRevenue * growthFactor : entry.target / 12;
-                const vsTarget = m.monthRevenue - proRataTarget;
-                const vsTargetPercent = proRataTarget ? (Math.abs(vsTarget) / proRataTarget) * 100 : null;
+                // Seasonal weighting stays per-month (unchanged) — only the displayed target is
+                // now a running cumulative total, same pattern as the "Cumulative" revenue column,
+                // so the two sit side by side and compare directly.
+                const monthlyProRataTarget = growthFactor !== null ? priorMonthRevenue * growthFactor : entry.target / 12;
+                cumulativeProRataTarget += monthlyProRataTarget;
+                const vsTarget = m.cumulative - cumulativeProRataTarget;
+                const vsTargetPercent = cumulativeProRataTarget ? (Math.abs(vsTarget) / cumulativeProRataTarget) * 100 : null;
                 const [mkMonth, mkYear] = m.monthKey.split("-").map(Number);
                 const isFuture =
                   latestCalYear !== null && (mkYear > latestCalYear || (mkYear === latestCalYear && mkMonth > latestCalMonth));
-                return { ...m, proRataTarget, vsTarget, vsTargetPercent, isFuture };
+                return { ...m, proRataTarget: cumulativeProRataTarget, vsTarget, vsTargetPercent, isFuture };
               });
 
               return (
@@ -2016,6 +2065,8 @@ export default function App() {
   const [groupBMonths, setGroupBMonths] = useState([]);
   const fileInputRef = useRef(null);
   const upiFileInputRef = useRef(null);
+  const manualCardUploadRef = useRef(false);
+  const manualUpiUploadRef = useRef(false);
 
   const categoryScopedRows = useMemo(() => {
     if (paymentCategoryFilter === "all") return rows;
@@ -2038,6 +2089,14 @@ export default function App() {
     const present = new Set(rows.map((r) => (r.date ? MONTH_NAMES[r.date.getMonth()] : null)));
     return FISCAL_MONTH_ORDER.filter((m) => present.has(m));
   }, [rows]);
+
+  // Month options scoped to the currently selected FY(s), for the sticky filter bar's Month
+  // dropdown — with no FY selected, this falls back to every month present anywhere in the data.
+  const fiscalMonthsForSelectedFy = useMemo(() => {
+    const scopedRows = fyFilter.length ? rows.filter((r) => fyFilter.includes(r.fiscalYear)) : rows;
+    const present = new Set(scopedRows.map((r) => (r.date ? MONTH_NAMES[r.date.getMonth()] : null)));
+    return FISCAL_MONTH_ORDER.filter((m) => present.has(m));
+  }, [rows, fyFilter]);
 
   const fiscalYearAchievement = useMemo(() => {
     const revenueByFY = new Map();
@@ -2126,6 +2185,14 @@ export default function App() {
   }, [fiscalMonths]);
 
   useEffect(() => {
+    setMonthFilter((current) => {
+      const validSet = new Set(fiscalMonthsForSelectedFy);
+      const pruned = current.filter((m) => validSet.has(m));
+      return pruned.length === current.length ? current : pruned;
+    });
+  }, [fiscalMonthsForSelectedFy]);
+
+  useEffect(() => {
     setBankFilter(banks);
   }, [banks]);
 
@@ -2134,6 +2201,7 @@ export default function App() {
   }, [offers]);
 
   function handleFileChange(file) {
+    manualCardUploadRef.current = true;
     setFileName(file.name);
     setError("");
     setMissingColumns([]);
@@ -2141,14 +2209,11 @@ export default function App() {
     const reader = new FileReader();
     reader.onload = (event) => {
       try {
-        const workbook = XLSX.read(event.target?.result, { type: "array" });
-        const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-        const jsonRows = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
-        if (!jsonRows.length) {
+        const { parsedRows, missingColumns: missing } = parseCardArrayBuffer(event.target?.result);
+        if (!parsedRows.length) {
           setError("The uploaded file is empty.");
           return;
         }
-        const { parsedRows, missingColumns: missing } = parseWorkbookRows(jsonRows);
         setRows((current) => [...current.filter((r) => r.paymentCategory === "UPI"), ...parsedRows]);
         setMissingColumns(missing);
         setSelectedOffer(null);
@@ -2177,14 +2242,14 @@ export default function App() {
   }
 
   function handleUpiFileChange(file) {
+    manualUpiUploadRef.current = true;
     setUpiFileName(file.name);
     setUpiError("");
 
     const reader = new FileReader();
     reader.onload = (event) => {
       try {
-        const workbook = XLSX.read(event.target?.result, { type: "array" });
-        const { parsedRows, missingColumns: missing } = parseUpiWorkbookRows(workbook);
+        const { parsedRows, missingColumns: missing } = parseUpiArrayBuffer(event.target?.result);
         if (!parsedRows.length) {
           setUpiError("The uploaded file is empty.");
           return;
@@ -2208,6 +2273,51 @@ export default function App() {
     setUpiError("");
     if (upiFileInputRef.current) upiFileInputRef.current.value = "";
   }
+
+  // Auto-load the two bundled default Excel files on every fresh mount, unless the user has
+  // already manually uploaded a replacement for that category (checked via ref so a manual
+  // upload that starts mid-fetch always wins, regardless of which async call resolves last).
+  // Nothing here is persisted (no localStorage) — a page refresh always re-fetches these.
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadDefaultCardFile() {
+      try {
+        const response = await fetch(defaultBankDataUrl);
+        const arrayBuffer = await response.arrayBuffer();
+        if (cancelled || manualCardUploadRef.current) return;
+        const { parsedRows, missingColumns: missing } = parseCardArrayBuffer(arrayBuffer);
+        if (!parsedRows.length) return;
+        setRows((current) => [...current.filter((r) => r.paymentCategory === "UPI"), ...parsedRows]);
+        setFileName(DEFAULT_BANK_FILE_NAME);
+        setMissingColumns(missing);
+      } catch {
+        if (!cancelled && !manualCardUploadRef.current) setError("Unable to load the default bank offers file.");
+      }
+    }
+
+    async function loadDefaultUpiFile() {
+      try {
+        const response = await fetch(defaultUpiDataUrl);
+        const arrayBuffer = await response.arrayBuffer();
+        if (cancelled || manualUpiUploadRef.current) return;
+        const { parsedRows, missingColumns: missing } = parseUpiArrayBuffer(arrayBuffer);
+        if (!parsedRows.length) return;
+        setRows((current) => [...current.filter((r) => r.paymentCategory !== "UPI"), ...parsedRows]);
+        setUpiFileName(DEFAULT_UPI_FILE_NAME);
+        setUpiError(missing.length ? `Missing columns were treated as zero: ${missing.join(", ")}` : "");
+      } catch {
+        if (!cancelled && !manualUpiUploadRef.current) setUpiError("Unable to load the default UPI data file.");
+      }
+    }
+
+    loadDefaultCardFile();
+    loadDefaultUpiFile();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const filteredRows = useMemo(
     () =>
@@ -2720,6 +2830,15 @@ export default function App() {
   const selectedBankDiscountEntry = useMemo(() => discountData.find((entry) => entry.bankName === selectedBank) || null, [discountData, selectedBank]);
   const anyModalOpen = Boolean(selectedBank || selectedOffer || showOffersByBank || showOffersByUpi || showTargetDetail);
 
+  const isFyFilterNarrowed = fyFilter.length > 0 && fyFilter.length < fiscalYears.length;
+  const isMonthFilterNarrowed = monthFilter.length > 0 && monthFilter.length < fiscalMonthsForSelectedFy.length;
+  const filterSummaryStripText = [
+    isFyFilterNarrowed ? `FY ${[...fyFilter].sort((a, b) => Number(a.split("-")[0]) - Number(b.split("-")[0])).join(", ")}` : null,
+    isMonthFilterNarrowed ? formatMonthRangeLabel(monthFilter) : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   function buildPairInsight(priorYear, currentYear, relevantRowsForYear, admitsMap) {
     const currentRows = relevantRowsForYear(currentYear);
     const priorRows = relevantRowsForYear(priorYear);
@@ -3064,6 +3183,12 @@ export default function App() {
           </div>
         ) : null}
 
+        {filterSummaryStripText && !anyModalOpen ? (
+          <div className="-mx-4 border-b border-borderSoft bg-blue-50/60 px-4 py-1.5 text-center text-xs font-bold text-accentBlue sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
+            {filterSummaryStripText}
+          </div>
+        ) : null}
+
         {/* Row 2 (was Row 3) — sticky, centered Date/Bank/Offer filter bar */}
         <div
           className={
@@ -3098,15 +3223,15 @@ export default function App() {
                 onToggle={(fy) => setFyFilter((current) => (current.includes(fy) ? current.filter((item) => item !== fy) : [...current, fy]))}
                 onClear={() => setFyFilter([])}
                 label="FY"
-                showSelectedNames
+                summaryText={summarizeFySelection(fyFilter, fiscalYears)}
               />
               <MultiSelectDropdown
-                options={fiscalMonths}
+                options={fiscalMonthsForSelectedFy}
                 selected={monthFilter}
                 onToggle={(month) => setMonthFilter((current) => (current.includes(month) ? current.filter((item) => item !== month) : [...current, month]))}
                 onClear={() => setMonthFilter([])}
                 label="month"
-                showSelectedNames
+                summaryText={summarizeMonthSelection(monthFilter, fiscalMonthsForSelectedFy)}
               />
               <MultiSelectDropdown
                 options={banks}
