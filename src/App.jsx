@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import pvrInoxLogo from "./Assets/pvr-inox-logo-transparent.png";
 import defaultBankDataUrl from "./Assets/BANK_DATA_APR24-AUG26.xlsx";
-import defaultUpiDataUrl from "./Assets/UPI DATA 24 APR - 26 JUL.xlsx";
+import defaultUpiDataUrl from "./assets/UPI_DATA_24_APR-26_AUG.xlsx";
 import {
   CartesianGrid,
   Bar,
@@ -21,7 +21,7 @@ import {
 } from "recharts";
 
 const DEFAULT_BANK_FILE_NAME = "BANK_DATA_APR24-AUG26.xlsx";
-const DEFAULT_UPI_FILE_NAME = "UPI DATA 24 APR - 26 JUL.xlsx";
+const DEFAULT_UPI_FILE_NAME = "UPI_DATA_24_APR-26_AUG.xlsx";
 
 const FISCAL_YEAR_TARGETS = {
   "24-25": null,
