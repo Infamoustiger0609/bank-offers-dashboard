@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
-import pvrInoxLogo from "./Assets/pvr-inox-logo-transparent.png";
-import defaultBankDataUrl from "./Assets/BANK_DATA_APR24-AUG26.xlsx";
+import pvrInoxLogo from "./assets/pvr-inox-logo-transparent.png";
+import defaultBankDataUrl from "./assets/BANK_DATA_APR24-AUG26.xlsx";
 import defaultUpiDataUrl from "./assets/UPI_DATA_24_APR-26_AUG.xlsx";
 import {
   CartesianGrid,
