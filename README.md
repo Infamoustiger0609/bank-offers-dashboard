@@ -1,261 +1,82 @@
 # Bank Offers Performance Dashboard
 
-A comprehensive analytics dashboard to track and analyze bank offer performance, revenue distribution, discount allocation, and operational insights for PVRINOX.
+An internal PVR INOX analytics dashboard for tracking how bank card offers and UPI partner cashbacks perform: revenue, transactions, discount cost (bank vs PVR share), ATP/AVT/SPH, and progress against fiscal-year revenue targets. It runs entirely in the browser — Excel files are parsed client-side and nothing is sent to a server.
 
-## 🎯 Overview
+## Tech stack
 
-The Bank Offers Performance Dashboard provides real-time visibility into:
-- **Revenue metrics** - Gross revenue, net revenue, and recovery rates
-- **Bank performance** - Revenue, discount costs, and transaction volume by bank
-- **Offer analytics** - Individual offer profitability, performance rankings, and date ranges
-- **Discount distribution** - Bank vs PVR contribution analysis
-- **Monthly trends** - Revenue tracking across selected banks over time
+- React 19 + Vite
+- Tailwind CSS 3
+- Recharts (charts)
+- SheetJS / `xlsx` (Excel parsing and export)
+- Deployed on Vercel
 
-## ✨ Features
+## Getting started
 
-### Core Dashboards
-- **KPI Cards** - 5 main metrics (Total Transactions, Gross Revenue, Net Revenue, Total Discount, Recovery Rate)
-- **Bank Scorecard** - Aggregated performance by bank with scrollable view
-- **Discount Split Chart** - Stacked horizontal bar chart showing Bank vs PVR contribution
-- **Top Offers Table** - Ranked by revenue with profit calculations and clickable details
-- **Offer Duration Tracking** - See how long each offer has been active
-- **Monthly Revenue Trend** - Multi-select bank comparison chart
-
-### Advanced Filters
-- **Multi-Date Selection** - Filter by one or multiple dates
-- **Bank Filter** - View specific bank performance
-- **Offer Filter** - Focus on individual offers
-- **Group By Toggle** - View all offers or aggregated by bank
-
-### Data Insights
-- **Offer Details Modal** - Click any offer to see full breakdown
-- **Date Range Visibility** - Track offer active periods
-- **Bank Contribution Analysis** - Understand Bank vs PVR cost sharing
-- **Profit Calculations** - Revenue minus discount equals profit
-
-## 🚀 Live Dashboard
-
-**Access the dashboard:**
-```
-https://bank-offers-dashboard.vercel.app
-```
-
-## 📊 How to Use
-
-### Step 1: Prepare Your Data
-Download the **Bank_Offers_Template.xlsx** file and fill it with your offer data.
-
-**Required columns:**
-- Card Offers Performance (offer name)
-- No. of Discounted Transactions
-- No. of Free Tickets
-- No. of Tickets
-- Transaction Total (Rs.)
-- Transaction Total Tickets (Rs.)
-- Transaction Total F&B (Rs.)
-- Amount Paid By Customer(Rs.)
-- Discount Amount(Rs.)
-- Discount Contribution Amount Bank (Rs.)
-- Discount Contribution Amount Inox (Rs.)
-- Conv.Fees(Rs.)
-- Date (format: YYYY-MM-DD)
-
-### Step 2: Upload File
-1. Open the dashboard link
-2. Click "Upload Excel File" or drag-drop your file
-3. Wait for data to load (2-3 seconds)
-
-### Step 3: Explore Data
-- **View KPIs** - See top-level metrics
-- **Filter by Date/Bank/Offer** - Narrow down analysis
-- **Click offers** - See detailed breakdown
-- **View trends** - Select multiple banks in monthly chart
-
-## 📁 Data Requirements
-
-### Format
-- File type: `.xlsx`, `.xls`, or `.csv`
-- Date format: `YYYY-MM-DD` (e.g., 2024-01-15)
-- Currency: Indian Rupees (₹)
-- Numbers: Enter as digits (not text)
-
-### Column Names (MUST match exactly)
-```
-Card Offers Performance
-No. of Discounted Transactions
-No. of Free Tickets
-No. of Tickets
-Transaction Total (Rs.)
-Transaction Total Tickets (Rs.)
-Transaction Total F&B (Rs.)
-Amount Paid By Customer(Rs.)
-Discount Amount(Rs.)
-Discount Contribution  Amount Bank (Rs.)
-Discount Contribution  Amount Inox (Rs.)
-Conv.Fees(Rs.)
-Date
-```
-
-### Bank Name Recognition
-The dashboard automatically extracts bank names from the offer string. 
-
-## 📈 Understanding the Dashboard
-
-### KPI Cards
-| Metric | Definition |
-|--------|-----------|
-| Total Transactions | Count of discounted transactions |
-| Gross Revenue | Total transaction amount before discount |
-| Net Revenue | Amount actually paid by customers (gross - discount) |
-| Total Discount Given | Sum of all discounts offered |
-| Recovery Rate | Net Revenue / Gross Revenue (%) |
-
-### Bank Scorecard
-Shows per-bank totals across all offers:
-- **Total Revenue** - Sum of all offers for that bank
-- **Discount Cost** - Bank's total discount contribution
-- **Total Transactions** - Volume of discounted transactions
-- **Total Offers** - Count of active offers per bank
-
-### Discount Distribution
-Stacked bar chart showing:
-- **Blue bars** - Bank's discount contribution
-- **Green bars** - PVR's discount contribution
-- Helps identify which entity bears more cost
-
-### Offer Performance Table
-Top 5 offers ranked by revenue:
-- **Profit** - Revenue minus discount (key metric)
-- **Click to expand** - See full offer details including:
-  - Offer type (B1G1, % off, Free Ticket)
-  - Bank contribution vs PVR
-  - Transaction breakdown
-
-### Total Offers by Bank
-Expandable section showing:
-- Number of active offers per bank
-- Date range (from first to last appearance)
-- Identifies long-running vs seasonal offers
-
-### Monthly Trend Chart
-- **X-axis** - Date (MM-YYYY format)
-- **Y-axis** - Revenue in ₹
-- **Multi-select** - Choose 1 or multiple banks
-- Independent filters (not affected by main filters)
-
-## 🔧 Technical Stack
-
-- **Frontend Framework** - React 18
-- **Styling** - Tailwind CSS
-- **Charts** - Recharts
-- **Data Processing** - SheetJS (XLSX parsing)
-- **Deployment** - Vercel
-- **Build Tool** - Vite
-
-## 📦 Installation & Deployment
-
-### Local Development
 ```bash
-# Install dependencies
-npm install
-
-# Run development server
-npm run dev
-
-# Build for production
-npm run build
+npm install       # install dependencies
+npm run dev       # start the Vite dev server
+npm run build     # production build to dist/
+npm run preview   # serve the production build locally
 ```
 
-### Deploy on Vercel
-1. Push code to GitHub
-2. Sign in to https://vercel.com
-3. Create "New Project" and select your repo
-4. Click "Deploy"
-5. Share the live URL with your team
+Add `-- --port <N> --strictPort` to `npm run dev` to choose a port. There is no lint script or test suite; `npm run build` is the verification step.
 
-## 👥 Team Usage
+Deployment happens automatically on Vercel when changes are pushed to the connected GitHub repository. Vercel is case-sensitive, so file names and import paths must match exactly.
 
-### For Operations Head
-- Monitor bank partnership health
-- Identify top-performing offers
-- Track revenue trends
-- Make data-driven partnership decisions
+## Data
 
-### For Analytics Team
-- Deep-dive into offer performance
-- Analyze discount allocation
-- Track seasonal patterns
-- Generate performance reports
+On load the dashboard automatically reads two bundled files from `src/assets/`:
 
-### For Finance Team
-- Monitor discount costs (Bank vs PVR)
-- Track recovery rates
-- Validate revenue figures
-- Analyze profitability by offer
+| Source | Default file |
+| --- | --- |
+| Bank / card offers | `BANK_DATA_APR24-OCT26.xlsx` |
+| UPI partners | `UPI_DATA_24_APR-26_AUG.xlsx` |
 
-## 🎨 Design & UX
+You can replace either one at any time with the upload buttons in the header (drag-and-drop also works). Uploading a Card file only replaces card data, and uploading a UPI file only replaces UPI data. Uploads are not saved — a page refresh reloads the bundled defaults. To change the bundled defaults, replace the file in `src/assets/` and update the import and file-name constant at the top of `src/App.jsx`.
 
-- **Light Theme** - Clean, professional appearance
-- **Responsive Layout** - Works on desktop and tablet
-- **Color-Coded Insights** - Easy data interpretation
-- **Scrollable Tables** - No page overflow
-- **Interactive Charts** - Hover for details, click for insights
-- **Modal Details** - Comprehensive offer information
+### Bank / card offers file
 
-## 🔒 Data Security
+First sheet of an `.xlsx`/`.xls`/`.csv`. Column headers must match these names (case-insensitive):
 
-- **No Backend Required** - All processing happens in your browser
-- **No Data Stored** - Files never uploaded to servers
-- **Offline Compatible** - Can work without internet (after loading)
-- **GDPR Compliant** - Customer data stays private
+`Card Offers Performance`, `Bank Name`, `No. of Discounted Transactions`, `No. of Free Tickets`, `No. of Tickets`, `Transaction Total (Rs.)`, `Transaction Total Tickets (Rs.)`, `Transaction Total F&B (Rs.)`, `Amount Paid By Customer(Rs.)`, `Discount Amount(Rs.)`, `Discount Contribution Amount Bank (Rs.)`, `Discount Contribution Amount Inox (Rs.)`, `Conv.Fees(Rs.)`, `Date`, `Transaction Type`
 
-## ⚠️ Known Limitations
+Optional cinema-wide ("universal") columns, used for the uplift comparisons and the UNI chart overlay: `Universal Transactions`, `Universal Total Admits`, `Universal Ticket Revenue`, `Universal Total Revenue`.
 
-- Works best with data from last 24 months
-- Charts handle up to 20 banks clearly
-- Single sheet per file (combine multiple sheets before upload)
-- Date format must be consistent (YYYY-MM-DD)
+### UPI partner file
 
-## 🐛 Troubleshooting
+`Month`, `UPI Partner`, `Total No. of Tkts`, `Total Amount (Rs.)`, `Overall Discount Amount (Rs.)`, `PVR Discount Amount (Rs.)`. Optional: `Bank Discount` (otherwise derived from overall minus PVR discount) and `No TRNX` (otherwise ticket count is used).
 
-### "Unknown Bank" appears
-- Bank name not recognized in offer string
-- Check offer naming convention matches expected format
+### Data notes
 
-### Numbers show as "NaN"
-- Column name mismatch
-- Use exact column names from template
+- Dates must fall between 2015 and 2035, otherwise the row drops out of date-based views.
+- Missing columns are treated as zero and reported in a warning banner.
+- The fiscal year runs April to March (e.g. `24-25` is Apr 2024 – Mar 2025).
 
-### Chart not displaying
-- Empty data after filtering
-- Check date format in Excel (YYYY-MM-DD)
-- Ensure numeric columns have numbers, not text
+## What's on the dashboard
 
-### File upload fails
-- File format not .xlsx/.xls/.csv
-- Corrupted file - re-save and try again
-- Large file (>10MB) - split into smaller chunks
+- **Filters (sticky bar):** Bank / UPI / Both toggle, Fiscal Year, Month, Bank and Offer multi-selects, plus quick periods (This Month, Last Month, QTD, FYTD).
+- **Info tiles:** active bank and UPI partner counts, total offers (with a Credit / Debit / Both split), downloadable offer lists per bank and per UPI partner, and fiscal-year targets.
+- **Key metrics:** Transactions, Revenue, ATP, AVT, Admits and SPH, each with an optional MoM / QoQ / YoY delta and, where available, an uplift-vs-universal line.
+- **Bank / UPI scorecard:** sortable per-partner revenue, transactions and discount, with the Bank vs PVR discount split; click a row for partner details.
+- **Charts:** revenue by channel, ticket vs F&B revenue, and the discount contribution split.
+- **Offer directory:** every offer by bank/partner with transactions, revenue, discount and discount rate; click for full offer details.
+- **Month-wise performance:** monthly trend per bank, month-on-month seasonal comparison across fiscal years, and year-on-year totals, with an optional cinema-wide overlay and click-through drill-downs explaining what changed.
+- **Target detail:** achieved vs target per fiscal year, a month-by-month cumulative pro-rata target weighted by last year's seasonality, and the required run rate for the rest of the current year.
+- **Comparison Module:** compare two independently filtered groups of banks/UPI partners (Group A vs Group B) on revenue, transactions, discount, admits and discount rate.
+- **Discount Budget:** each card bank's actual discount spend against a monthly budget (₹15L per bank per month by default), with a per-bank monthly breakdown. UPI partners are excluded.
 
-## 📞 Support
+Large values are shown in Lakh (L) or Crore (Cr); values below ₹1 L are shown in Thousands (K).
 
-For issues or feature requests:
-1. Check data format matches template
-2. Review column names (case-sensitive)
-3. Verify date format (YYYY-MM-DD)
-4. Clear browser cache and retry
+## Project layout
 
-## 📝 Version History
+```
+src/
+  App.jsx       # the whole application (parsing, aggregation, components, page)
+  main.jsx      # React entry point
+  index.css     # Tailwind directives and base styles
+  assets/       # logo and the default bank / UPI Excel files
+index.html
+tailwind.config.js, postcss.config.js, vite.config.js
+```
 
-**v1.0** (Current)
-- Multi-date selection filter
-- Discount split chart (Bank vs PVR)
-- Offer duration tracking
-- Monthly trend analysis
-- Full offer details modal
-- Top offers ranking
-- Bank scorecard
-
-
-**Last Updated:** June 20246 
-**Dashboard URL:** https://bank-offers-dashboard.vercel.app  
-**Template Download:** https://drive.google.com/drive/folders/1aVGXDWyQRN4mlwL3PLSTZUSkd34LJeU_
+Everything lives in `src/App.jsx` by design. See `CLAUDE.md` for a detailed architecture guide (filter scopes, offer-name canonicalisation, target logic and so on).

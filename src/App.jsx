@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import pvrInoxLogo from "./assets/pvr-inox-logo-transparent.png";
-import defaultBankDataUrl from "./assets/BANK_DATA_APR24-AUG26.xlsx";
+import defaultBankDataUrl from "./assets/BANK_DATA_APR24-OCT26.xlsx";
 import defaultUpiDataUrl from "./assets/UPI_DATA_24_APR-26_AUG.xlsx";
 import {
   CartesianGrid,
@@ -20,7 +20,7 @@ import {
   YAxis,
 } from "recharts";
 
-const DEFAULT_BANK_FILE_NAME = "BANK_DATA_APR24-AUG26.xlsx";
+const DEFAULT_BANK_FILE_NAME = "BANK_DATA_APR24-OCT26.xlsx";
 const DEFAULT_UPI_FILE_NAME = "UPI_DATA_24_APR-26_AUG.xlsx";
 
 const FISCAL_YEAR_TARGETS = {
@@ -200,13 +200,17 @@ function formatCompactNumber(value) {
 }
 
 function formatInLakh(value) {
-  const lakhValue = Number(value || 0) / 100000;
+  const amount = Number(value || 0);
+  if (Math.abs(amount) < 100000) return `₹${(amount / 1000).toFixed(1)} K`;
+  const lakhValue = amount / 100000;
   const decimals = Math.abs(lakhValue) >= 1 ? 0 : 2;
   return `₹${lakhValue.toFixed(decimals)} L`;
 }
 
 function formatCountInLakh(value) {
-  const lakhValue = Number(value || 0) / 100000;
+  const amount = Number(value || 0);
+  if (Math.abs(amount) < 100000) return `${(amount / 1000).toFixed(1)} K`;
+  const lakhValue = amount / 100000;
   const decimals = Math.abs(lakhValue) >= 1 ? 0 : 2;
   return `${lakhValue.toFixed(decimals)} L`;
 }
@@ -2058,6 +2062,8 @@ export default function App() {
   const upiFileInputRef = useRef(null);
   const manualCardUploadRef = useRef(false);
   const manualUpiUploadRef = useRef(false);
+  const [defaultsSettled, setDefaultsSettled] = useState(false);
+  const fytdAppliedRef = useRef(false);
 
   const categoryScopedRows = useMemo(() => {
     if (paymentCategoryFilter === "all") return rows;
@@ -2302,13 +2308,22 @@ export default function App() {
       }
     }
 
-    loadDefaultCardFile();
-    loadDefaultUpiFile();
+    Promise.all([loadDefaultCardFile(), loadDefaultUpiFile()]).then(() => {
+      if (!cancelled) setDefaultsSettled(true);
+    });
 
     return () => {
       cancelled = true;
     };
   }, []);
+
+  // Apply the FYTD quick period once on first load, after both default files have settled
+  // (the reset-to-all effects above re-run on every rows change, so firing earlier would be overwritten).
+  useEffect(() => {
+    if (fytdAppliedRef.current || !defaultsSettled || !latestDataDate) return;
+    fytdAppliedRef.current = true;
+    applyQuickPeriod("fytd", latestDataDate);
+  }, [defaultsSettled, latestDataDate]);
 
   const filteredRows = useMemo(
     () =>
